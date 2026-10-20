@@ -1,0 +1,143 @@
+import { apiService, ApiResponse } from './api.service';
+
+export interface UserProfile {
+  _id: string;
+  username: string;
+  displayName?: string;
+  avatar?: string;
+  avatarCharacter?: string;
+  avatarBackgroundColor?: string;
+  pixelCharacter?: {
+    gender?: string;
+    skinColor: string;
+    hairStyle: string;
+    hairColor: string;
+    eyeColor: string;
+    shirtStyle?: string;
+    shirtColor: string;
+    pantsStyle?: string;
+    pantsColor: string;
+    shoeStyle?: string;
+    shoeColor: string;
+    name?: string;
+  };
+  nameColor?: string | null;
+  bio?: string;
+  email?: string;
+  postCount: number;
+  followersCount?: number;
+  followingCount?: number;
+  totalLikes?: number;
+  totalComments?: number;
+  isFollowing?: boolean;
+  isBlocked?: boolean;
+  createdAt: string;
+  healthInfo?: {
+    mentalHealth?: Array<{ condition: string; type?: string; severity: 'mild' | 'moderate' | 'severe'; notes?: string }>;
+    physicalHealth?: Array<{ condition: string; type?: string; severity: 'mild' | 'moderate' | 'severe'; notes?: string }>;
+    medications?: string[];
+    therapies?: string[];
+    lifeContext?: string;
+    dateOfBirth?: string;
+    gender?: string;
+    country?: string;
+    lifestyle?: {
+      smoking?: string;
+      alcohol?: string;
+      drugs?: string;
+      physicalActivity?: string;
+      diet?: string;
+      sleep?: string;
+    };
+  };
+}
+
+class UserService {
+  async getUserProfile(userId: string): Promise<ApiResponse<UserProfile>> {
+    return apiService.get<UserProfile>(`/users/${userId}`);
+  }
+
+  async searchUsers(
+    query: string,
+    page: number = 1,
+    limit: number = 20
+  ): Promise<ApiResponse<UserProfile[]>> {
+    return apiService.get<UserProfile[]>(
+      `/users/search?q=${encodeURIComponent(query)}&page=${page}&limit=${limit}`
+    );
+  }
+
+  async updateProfile(data: {
+    username?: string;
+    displayName?: string;
+    bio?: string;
+    avatar?: string;
+    avatarCharacter?: string;
+    avatarBackgroundColor?: string;
+    nameColor?: string | null;
+    isAnonymous?: boolean;
+    showEmail?: boolean;
+    email?: string;
+    phoneNumber?: string;
+    healthInfo?: UserProfile['healthInfo'];
+    pixelCharacter?: {
+      gender?: string;
+      skinColor: string;
+      hairStyle: string;
+      hairColor: string;
+      eyeColor: string;
+      shirtStyle?: string;
+      shirtColor: string;
+      pantsStyle?: string;
+      pantsColor: string;
+      shoeStyle?: string;
+      shoeColor: string;
+      name?: string;
+    };
+  }): Promise<ApiResponse<UserProfile>> {
+    return apiService.put<UserProfile>('/users/profile', data);
+  }
+
+  async followUser(userId: string): Promise<ApiResponse<{ isFollowing: boolean }>> {
+    return apiService.post<{ isFollowing: boolean }>(`/users/${userId}/follow`, {});
+  }
+
+  async getFollowers(
+    userId: string,
+    page: number = 1,
+    limit: number = 20
+  ): Promise<ApiResponse<UserProfile[]>> {
+    return apiService.get<UserProfile[]>(
+      `/users/${userId}/followers?page=${page}&limit=${limit}`
+    );
+  }
+
+  async getFollowing(
+    userId: string,
+    page: number = 1,
+    limit: number = 20
+  ): Promise<ApiResponse<UserProfile[]>> {
+    return apiService.get<UserProfile[]>(
+      `/users/${userId}/following?page=${page}&limit=${limit}`
+    );
+  }
+
+  async blockUser(userId: string): Promise<ApiResponse<{ isBlocked: boolean }>> {
+    return apiService.post<{ isBlocked: boolean }>(`/users/${userId}/block`, {});
+  }
+
+  async getBlockedUsers(): Promise<ApiResponse<UserProfile[]>> {
+    return apiService.get<UserProfile[]>('/users/blocked');
+  }
+
+  async deleteAccount(): Promise<ApiResponse<void>> {
+    return apiService.delete<void>('/users/account');
+  }
+
+  async reportUser(userId: string, reason: string): Promise<ApiResponse<void>> {
+    return apiService.post<void>(`/users/${userId}/report`, { reason });
+  }
+}
+
+export const userService = new UserService();
+

@@ -1,0 +1,1980 @@
+import { Response } from 'express';
+import { Types } from 'mongoose';
+import JournalEntry, { IJournalEntry, IAIInsights } from '../models/JournalEntry';
+import Journal, { IJournal } from '../models/Journal';
+import User from '../models/User';
+import Notification from '../models/Notification';
+import CalendarEvent from '../models/Calendar';
+import ChatContext from '../models/ChatContext';
+import UserProfileMemory from '../models/UserProfileMemory';
+import { AuthRequest } from '../middleware/auth';
+import { getClaudeClient } from '../services/claudeClient';
+import { storeMemoryPoints } from '../services/memoryEmbedding.service';
+import { formatCompleteContextForAI } from '../utils/healthInfoFormatter';
+import { escapeRegex } from '../utils/helpers';
+import { parsePage, parseLimit, calculateSkip } from '../utils/pagination';
+
+const claude = getClaudeClient();
+
+// ==================== JOURNAL CRUD ====================
+
+// @desc    Create a new journal
+// @route   POST /api/journals
+// @access  Private
+export const createJournal = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { name, description, isPublic, coverImage, topics } = req.body;
+
+    if (!name || name.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Journal name is required',
+      });
+      return;
+    }
+
+    const journal = await Journal.create({
+      name: name.trim(),
+      description: description?.trim(),
+      owner: req.userId,
+      isPublic: isPublic === true,
+      coverImage,
+      topics: topics && Array.isArray(topics) ? topics.map((t: string) => t.trim().toLowerCase()).filter((t: string) => t.length > 0) : [],
+    });
+
+    res.status(201).json({
+      success: true,
+      data: journal,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error creating journal',
+    });
+  }
+};
+
+// @desc    Get user's journals
+// @route   GET /api/journals
+// @access  Private
+export const getUserJournals = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const page = parsePage(req.query.page as string);
+    const limit = parseLimit(req.query.limit as string);
+    const skip = calculateSkip(page, limit);
+
+    const query: any = { owner: req.userId };
+
+    const journals = await Journal.find(query)
+      .populate('owner', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Journal.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: journals,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching journals',
+    });
+  }
+};
+
+// @desc    Get public journals
+// @route   GET /api/journals/public
+// @access  Public
+export const getPublicJournals = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const page = parsePage(req.query.page as string);
+    const limit = parseLimit(req.query.limit as string);
+    const skip = calculateSkip(page, limit);
+    const search = req.query.search as string;
+    const topic = req.query.topic as string;
+    const sort = req.query.sort as string || 'popular'; // popular, newest, most-entries
+
+    const query: any = { isPublic: true };
+
+    if (search) {
+      const sanitizedSearch = escapeRegex(search);
+      query.$or = [
+        { name: { $regex: sanitizedSearch, $options: 'i' } },
+        { description: { $regex: sanitizedSearch, $options: 'i' } },
+      ];
+    }
+
+    // Filter by topic if provided
+    if (topic) {
+      const topicLower = topic.toLowerCase().trim();
+      // Topics is an array, so we check if the topic exists in the array
+      // MongoDB will match if the array contains the value
+      query.topics = topicLower;
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🔍 Public journals query:', JSON.stringify(query, null, 2));
+      if (topic) {
+        console.log('📌 Filtering by topic:', topic.toLowerCase().trim());
+      }
+    }
+
+    // Determine sort order based on sort parameter
+    let sortOrder: any = {};
+    switch (sort) {
+      case 'newest':
+        sortOrder = { createdAt: -1 };
+        break;
+      case 'most-entries':
+        sortOrder = { entriesCount: -1, createdAt: -1 };
+        break;
+      case 'popular':
+      default:
+        sortOrder = { followersCount: -1, createdAt: -1 };
+        break;
+    }
+
+    const journals = await Journal.find(query)
+      .populate('owner', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .sort(sortOrder)
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Journal.countDocuments(query);
+
+    // Check if current user is following each journal
+    // Reload journals with followers array to ensure we have the latest data
+    const journalIds = journals.map(j => j._id);
+    const journalsWithFollowers = await Journal.find({ _id: { $in: journalIds } })
+      .select('followers');
+    
+    const followersMap = new Map();
+    journalsWithFollowers.forEach(j => {
+      followersMap.set(j._id.toString(), j.followers || []);
+    });
+
+    const journalsWithFollowStatus = journals.map((journal) => {
+      const journalObj = journal.toObject();
+      const followers = followersMap.get(journal._id.toString()) || journal.followers || [];
+      // More robust check for isFollowing status
+      const isFollowing = req.userId ? followers.some((followerId: any) => {
+        let followerIdStr: string;
+        if (typeof followerId === 'object' && followerId !== null && '_id' in followerId) {
+          followerIdStr = followerId._id.toString();
+        } else {
+          followerIdStr = String(followerId);
+        }
+        return followerIdStr === req.userId;
+      }) : false;
+      return { ...journalObj, isFollowing };
+    });
+
+    res.json({
+      success: true,
+      data: journalsWithFollowStatus,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching public journals',
+    });
+  }
+};
+
+// @desc    Get single journal
+// @route   GET /api/journals/:id
+// @access  Private (if private) or Public (if public)
+export const getJournal = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    // First, get the journal without populate to check ownership
+    const journal = await Journal.findById(req.params.id);
+
+    if (!journal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found',
+      });
+      return;
+    }
+
+    // Check access - owners always have access, even for private journals
+    // Compare owner ObjectId directly with userId string
+    const ownerIdStr = journal.owner.toString();
+    const userIdStr = String(req.userId || '');
+    const isOwner = ownerIdStr === userIdStr;
+    
+    if (!journal.isPublic && !isOwner) {
+      res.status(403).json({
+        success: false,
+        message: 'Access denied',
+      });
+      return;
+    }
+
+    // Now populate for the response
+    await journal.populate('owner', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+    await journal.populate('followers', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+
+    const journalObj = journal.toObject();
+    const isFollowing = req.userId ? journal.followers.some((followerId) => {
+      let followerIdStr: string;
+      if (typeof followerId === 'object' && followerId !== null && '_id' in followerId) {
+        followerIdStr = followerId._id.toString();
+      } else {
+        followerIdStr = String(followerId);
+      }
+      return followerIdStr === req.userId;
+    }) : false;
+
+    res.json({
+      success: true,
+      data: { ...journalObj, isFollowing, isOwner },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching journal',
+    });
+  }
+};
+
+// @desc    Update journal
+// @route   PUT /api/journals/:id
+// @access  Private (owner only)
+export const updateJournal = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const journal = await Journal.findById(req.params.id);
+
+    if (!journal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found',
+      });
+      return;
+    }
+
+    if (journal.owner.toString() !== req.userId) {
+      res.status(403).json({
+        success: false,
+        message: 'Not authorized to update this journal',
+      });
+      return;
+    }
+
+    const { name, description, isPublic, coverImage, topics } = req.body;
+
+    if (name !== undefined) journal.name = name.trim();
+    if (description !== undefined) journal.description = description?.trim();
+    if (isPublic !== undefined) journal.isPublic = isPublic;
+    if (coverImage !== undefined) journal.coverImage = coverImage;
+    if (topics !== undefined) {
+      journal.topics = Array.isArray(topics) 
+        ? topics.map((t: string) => t.trim().toLowerCase()).filter((t: string) => t.length > 0)
+        : [];
+    }
+
+    await journal.save();
+
+    res.json({
+      success: true,
+      data: journal,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error updating journal',
+    });
+  }
+};
+
+// @desc    Delete journal
+// @route   DELETE /api/journals/:id
+// @access  Private (owner only)
+export const deleteJournal = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const journal = await Journal.findById(req.params.id);
+
+    if (!journal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found',
+      });
+      return;
+    }
+
+    if (journal.owner.toString() !== req.userId) {
+      res.status(403).json({
+        success: false,
+        message: 'Not authorized to delete this journal',
+      });
+      return;
+    }
+
+    // Delete all entries in this journal
+    await JournalEntry.deleteMany({ journal: journal._id });
+
+    // Delete the journal
+    await Journal.findByIdAndDelete(req.params.id);
+
+    res.json({
+      success: true,
+      message: 'Journal deleted successfully',
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error deleting journal',
+    });
+  }
+};
+
+// @desc    Follow a journal
+// @route   POST /api/journals/:id/follow
+// @access  Private
+export const followJournal = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const journal = await Journal.findById(req.params.id);
+
+    if (!journal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found',
+      });
+      return;
+    }
+
+    if (!journal.isPublic) {
+      res.status(403).json({
+        success: false,
+        message: 'Cannot follow private journal',
+      });
+      return;
+    }
+
+    if (journal.owner.toString() === req.userId) {
+      res.status(400).json({
+        success: false,
+        message: 'Cannot follow your own journal',
+      });
+      return;
+    }
+
+    if (!req.userId) {
+      res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+      });
+      return;
+    }
+
+    if (journal.followers.some((followerId) => followerId.toString() === req.userId)) {
+      res.status(400).json({
+        success: false,
+        message: 'Already following this journal',
+      });
+      return;
+    }
+
+    journal.followers.push(new Types.ObjectId(req.userId));
+    await journal.save();
+
+    // Reload journal to ensure we have the latest state
+    const updatedJournal = await Journal.findById(journal._id)
+      .populate('owner', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+    
+    if (!updatedJournal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found after update',
+      });
+      return;
+    }
+
+    const journalObj = updatedJournal.toObject();
+    const isFollowing = true; // We just followed it
+
+    res.json({
+      success: true,
+      data: { ...journalObj, isFollowing, followersCount: updatedJournal.followersCount },
+      message: 'Journal followed successfully',
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error following journal',
+    });
+  }
+};
+
+// @desc    Unfollow a journal
+// @route   POST /api/journals/:id/unfollow
+// @access  Private
+export const unfollowJournal = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const journal = await Journal.findById(req.params.id);
+
+    if (!journal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found',
+      });
+      return;
+    }
+
+    if (!req.userId) {
+      res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+      });
+      return;
+    }
+
+    if (!journal.followers.some((followerId) => followerId.toString() === req.userId)) {
+      res.status(400).json({
+        success: false,
+        message: 'Not following this journal',
+      });
+      return;
+    }
+
+    journal.followers = journal.followers.filter(
+      (followerId) => followerId.toString() !== req.userId
+    );
+    await journal.save();
+
+    // Reload journal to ensure we have the latest state
+    const updatedJournal = await Journal.findById(journal._id)
+      .populate('owner', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+    
+    if (!updatedJournal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found after update',
+      });
+      return;
+    }
+
+    const journalObj = updatedJournal.toObject();
+    const isFollowing = false; // We just unfollowed it
+
+    res.json({
+      success: true,
+      data: { ...journalObj, isFollowing, followersCount: updatedJournal.followersCount },
+      message: 'Journal unfollowed successfully',
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error unfollowing journal',
+    });
+  }
+};
+
+// @desc    Get followed journals
+// @route   GET /api/journals/following
+// @access  Private
+export const getFollowingJournals = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const page = parsePage(req.query.page as string);
+    const limit = parseLimit(req.query.limit as string);
+    const skip = calculateSkip(page, limit);
+
+    if (!req.userId) {
+      res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+      });
+      return;
+    }
+
+    const userIdObjectId = new Types.ObjectId(req.userId);
+    const journals = await Journal.find({ followers: userIdObjectId })
+      .populate('owner', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .sort({ updatedAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Journal.countDocuments({ followers: userIdObjectId });
+
+    const journalsWithFollowStatus = journals.map((journal) => {
+      const journalObj = journal.toObject();
+      return { ...journalObj, isFollowing: true };
+    });
+
+    res.json({
+      success: true,
+      data: journalsWithFollowStatus,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching followed journals',
+    });
+  }
+};
+
+// ==================== JOURNAL ENTRY CRUD ====================
+
+// @desc    Get all journal entries for current user or public journal entries
+// @route   GET /api/journal
+// @access  Private
+export const getEntries = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const page = parsePage(req.query.page as string);
+    const limit = parseLimit(req.query.limit as string);
+    const skip = calculateSkip(page, limit);
+    const startDate = req.query.startDate as string;
+    const endDate = req.query.endDate as string;
+    const mood = req.query.mood as string;
+    const tag = req.query.tag as string;
+    const journalId = req.query.journalId as string;
+
+    const query: any = {};
+
+    // If journalId is provided, check if it's a public journal
+    if (journalId) {
+      const journal = await Journal.findById(journalId);
+      if (!journal) {
+        res.status(404).json({
+          success: false,
+          message: 'Journal not found',
+        });
+        return;
+      }
+
+      // Check if user is the owner
+      const ownerIdStr = journal.owner.toString();
+      const userIdStr = String(req.userId || '');
+      const isOwner = ownerIdStr === userIdStr;
+
+      // If not owner, check if journal is public
+      if (!isOwner && !journal.isPublic) {
+        res.status(403).json({
+          success: false,
+          message: 'Access denied',
+        });
+        return;
+      }
+
+      // Set query based on ownership
+      if (isOwner) {
+        // Owner can see all their entries
+        query.author = new Types.ObjectId(req.userId);
+      } else {
+        // For public journals, get entries from the journal owner
+        // Ensure owner is an ObjectId
+        query.author = typeof journal.owner === 'string' 
+          ? new Types.ObjectId(journal.owner) 
+          : journal.owner;
+      }
+      query.journal = new Types.ObjectId(journalId);
+      // Only show non-private entries for public journals
+      // Use $ne (not equal) to include entries where isPrivate is false, undefined, or doesn't exist
+      if (!isOwner) {
+        query.isPrivate = { $ne: true };
+      }
+
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[getEntries] Public journal query:`, JSON.stringify({
+          author: query.author.toString(),
+          journal: query.journal.toString(),
+          isPrivate: query.isPrivate,
+          isOwner,
+          journalIsPublic: journal.isPublic
+        }));
+      }
+    } else {
+      // No journalId provided, default to current user's entries
+      if (!req.userId) {
+        res.status(401).json({
+          success: false,
+          message: 'Authentication required',
+        });
+        return;
+      }
+      query.author = req.userId;
+    }
+
+    // Date range filter
+    if (startDate || endDate) {
+      query.createdAt = {};
+      if (startDate) {
+        query.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        query.createdAt.$lte = new Date(endDate);
+      }
+    }
+
+    // Mood filter
+    if (mood) {
+      const moodNum = parseInt(mood);
+      if (!isNaN(moodNum)) {
+        query.mood = moodNum;
+      }
+    }
+
+    // Tag filter
+    if (tag) {
+      query.tags = tag.toLowerCase();
+    }
+
+    const entries = await JournalEntry.find(query)
+      .populate('journal', 'name isPublic owner')
+      .populate('author', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await JournalEntry.countDocuments(query);
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[getEntries] Found ${entries.length} entries (total: ${total}) for query:`, JSON.stringify(query));
+    }
+
+    res.json({
+      success: true,
+      data: entries,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching journal entries',
+    });
+  }
+};
+
+// @desc    Get single journal entry
+// @route   GET /api/journal/:id
+// @access  Private (own entries) or Public (if journal is public)
+export const getEntry = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    // #region agent log
+    const mongoose = require('mongoose');
+    const isValidObjectId = mongoose.Types.ObjectId.isValid(req.params.id);
+    console.log(JSON.stringify({location:'journalController.ts:670',message:'getEntry called with params.id',data:{id:req.params.id,isValidObjectId,url:req.url},timestamp:Date.now(),runId:'run1',hypothesisId:'C'}));
+    // #endregion
+    
+    // Validate that the ID is a valid ObjectId
+    if (!Types.ObjectId.isValid(req.params.id)) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid journal entry ID',
+      });
+      return;
+    }
+    
+    // First, try to find entry by ID
+    const entry = await JournalEntry.findById(req.params.id)
+      .populate('journal', 'name isPublic owner')
+      .populate('author', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+
+    if (!entry) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal entry not found',
+      });
+      return;
+    }
+
+    // Check if user owns this entry
+    let authorId: string;
+    if (typeof entry.author === 'object' && entry.author !== null && '_id' in entry.author) {
+      authorId = (entry.author as any)._id.toString();
+    } else {
+      authorId = String(entry.author);
+    }
+    const isOwner = req.userId ? authorId === req.userId : false;
+
+    // If not owner, check if journal is public and entry is not private
+    if (!isOwner) {
+      // Check if entry is private
+      if (entry.isPrivate) {
+        res.status(403).json({
+          success: false,
+          message: 'Access denied',
+        });
+        return;
+      }
+
+      const journal = entry.journal;
+      // Check if journal is populated (object) or just an ObjectId (string)
+      if (typeof journal === 'object' && journal !== null && 'isPublic' in journal) {
+        // Journal is populated, check isPublic directly
+        if (!(journal as any).isPublic) {
+          res.status(403).json({
+            success: false,
+            message: 'Access denied',
+          });
+          return;
+        }
+      } else {
+        // If journal is not populated, fetch it
+        const journalId = typeof journal === 'string' ? journal : String(journal);
+        const journalDoc = await Journal.findById(journalId);
+        if (!journalDoc || !journalDoc.isPublic) {
+          res.status(403).json({
+            success: false,
+            message: 'Access denied',
+          });
+          return;
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: { ...entry.toObject(), isOwner },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching journal entry',
+    });
+  }
+};
+
+// @desc    Create new journal entry
+// @route   POST /api/journal
+// @access  Private
+export const createEntry = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { content, mood, audioUrl, transcription, symptoms, tags, promptId, promptText, journalId, fontFamily } = req.body;
+
+    if (!content || content.trim().length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Content is required',
+      });
+      return;
+    }
+
+    if (!mood || mood < 1 || mood > 10) {
+      res.status(400).json({
+        success: false,
+        message: 'Valid mood rating (1-10) is required',
+      });
+      return;
+    }
+
+    if (!journalId) {
+      res.status(400).json({
+        success: false,
+        message: 'Journal ID is required',
+      });
+      return;
+    }
+
+    // Verify journal exists and belongs to user
+    const journal = await Journal.findById(journalId).populate('followers', '_id');
+    if (!journal) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal not found',
+      });
+      return;
+    }
+
+    if (journal.owner.toString() !== req.userId) {
+      res.status(403).json({
+        success: false,
+        message: 'Not authorized to add entries to this journal',
+      });
+      return;
+    }
+
+    const entry = await JournalEntry.create({
+      author: req.userId,
+      journal: journalId,
+      content: content.trim(),
+      mood,
+      audioUrl,
+      transcription,
+      symptoms: symptoms || [],
+      tags: tags || [],
+      promptId,
+      promptText,
+      fontFamily: fontFamily || 'palatino', // Default to Palatino if not provided
+      isPrivate: !journal.isPublic, // Entry privacy follows journal privacy
+    });
+
+    // Update journal entries count
+    journal.entriesCount = (journal.entriesCount || 0) + 1;
+    await journal.save();
+
+    // Notify followers of public journals about new entries
+    try {
+      if (journal.isPublic && Array.isArray(journal.followers) && journal.followers.length > 0) {
+        const ownerId = journal.owner.toString();
+        const followers = journal.followers as any[];
+
+        for (const follower of followers) {
+          const followerId = (follower._id || follower).toString();
+
+          // Skip notifying the owner if they somehow appear in followers
+          if (followerId === ownerId) continue;
+
+          const notification = await Notification.create({
+            user: followerId,
+            type: 'journal_entry',
+            relatedUser: journal.owner,
+            relatedJournal: journal._id,
+            relatedEntry: entry._id,
+            message: `shared a new entry in "${journal.name}"`,
+          });
+
+          // Populate minimal fields for WebSocket/push usage
+          await notification.populate('relatedUser', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter nameColor');
+          await notification.populate('relatedJournal', 'name');
+          await notification.populate('relatedEntry', '_id');
+
+          // Use existing notification pipeline (WebSocket + push + unread count)
+          const { sendNotificationToUser, sendUnreadCountUpdate } = await import('./notificationWebSocket');
+          await sendNotificationToUser(followerId, notification);
+          await sendUnreadCountUpdate(followerId);
+        }
+      }
+    } catch (notifyError) {
+      console.error('Error sending journal entry notifications:', notifyError);
+      // Do not block entry creation on notification errors
+    }
+
+    // Optional self streak reminder: "You wrote X days in a row"
+    try {
+      if (req.userId) {
+        const authorId = new Types.ObjectId(req.userId);
+
+        // Look back up to 30 days for streak calculation
+        const now = new Date();
+        const startDate = new Date(now);
+        startDate.setDate(startDate.getDate() - 30);
+        startDate.setHours(0, 0, 0, 0);
+
+        const authorEntries = await JournalEntry.find({
+          author: authorId,
+          createdAt: { $gte: startDate, $lte: now },
+        }).sort({ createdAt: 1 });
+
+        if (authorEntries.length > 0) {
+          // Reuse streak algorithm similar to /journal/insights
+          const sortedEntries = authorEntries
+            .filter((e) => e.createdAt)
+            .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+
+          let streakDays = 0;
+          const currentDate = new Date();
+          currentDate.setHours(0, 0, 0, 0);
+
+          for (const e of sortedEntries) {
+            if (!e.createdAt) continue;
+            const entryDate = new Date(e.createdAt);
+            entryDate.setHours(0, 0, 0, 0);
+
+            if (entryDate.getTime() === currentDate.getTime()) {
+              streakDays++;
+              currentDate.setDate(currentDate.getDate() - 1);
+            } else if (entryDate.getTime() < currentDate.getTime()) {
+              break;
+            }
+          }
+
+          // Only notify on meaningful milestones to avoid spam
+          const milestones = new Set([3, 7, 14, 21, 30]);
+          if (milestones.has(streakDays)) {
+            const message =
+              streakDays === 1
+                ? 'You wrote in your journal today. Keep going!'
+                : `You wrote ${streakDays} days in a row. Keep going!`;
+
+            const streakNotification = await Notification.create({
+              user: authorId,
+              type: 'journal_streak',
+              relatedUser: authorId,
+              streakDays,
+              message,
+            });
+
+            const { sendNotificationToUser, sendUnreadCountUpdate } = await import('./notificationWebSocket');
+            await sendNotificationToUser(authorId.toString(), streakNotification);
+            await sendUnreadCountUpdate(authorId.toString());
+          }
+        }
+      }
+    } catch (streakError) {
+      console.error('Error sending journal streak notification:', streakError);
+      // Never block entry creation on streak reminder errors
+    }
+
+    res.status(201).json({
+      success: true,
+      data: entry,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error creating journal entry',
+    });
+  }
+};
+
+// @desc    Update journal entry
+// @route   PUT /api/journal/:id
+// @access  Private
+export const updateEntry = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const entry = await JournalEntry.findOne({
+      _id: req.params.id,
+      author: req.userId,
+    });
+
+    if (!entry) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal entry not found',
+      });
+      return;
+    }
+
+    const { content, mood, symptoms, tags } = req.body;
+
+    if (content !== undefined) entry.content = content.trim();
+    if (mood !== undefined) entry.mood = mood;
+    if (symptoms !== undefined) entry.symptoms = symptoms;
+    if (tags !== undefined) entry.tags = tags;
+
+    await entry.save();
+
+    res.json({
+      success: true,
+      data: entry,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error updating journal entry',
+    });
+  }
+};
+
+// @desc    Delete journal entry
+// @route   DELETE /api/journal/:id
+// @access  Private
+export const deleteEntry = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const entry = await JournalEntry.findOne({
+      _id: req.params.id,
+      author: req.userId,
+    });
+
+    if (!entry) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal entry not found',
+      });
+      return;
+    }
+
+    const journalId = entry.journal;
+
+    await JournalEntry.findByIdAndDelete(req.params.id);
+
+    // Update journal entries count
+    const journal = await Journal.findById(journalId);
+    if (journal) {
+      journal.entriesCount = Math.max(0, (journal.entriesCount || 1) - 1);
+      await journal.save();
+    }
+
+    res.json({
+      success: true,
+      message: 'Journal entry deleted successfully',
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error deleting journal entry',
+    });
+  }
+};
+
+// @desc    Get entries from followed journals
+// @route   GET /api/journal/following
+// @access  Private
+export const getFollowingEntries = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const page = parsePage(req.query.page as string);
+    const limit = parseLimit(req.query.limit as string);
+    const skip = calculateSkip(page, limit);
+
+    if (!req.userId) {
+      res.status(401).json({
+        success: false,
+        message: 'Authentication required',
+      });
+      return;
+    }
+
+    // Get journals user is following
+    const userIdObjectId = new Types.ObjectId(req.userId);
+    const followedJournals = await Journal.find({ followers: userIdObjectId }).select('_id');
+    const journalIds = followedJournals.map((j) => j._id);
+
+    if (journalIds.length === 0) {
+      res.json({
+        success: true,
+        data: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          pages: 0,
+        },
+      });
+      return;
+    }
+
+    const entries = await JournalEntry.find({
+      journal: { $in: journalIds },
+      isPrivate: false,
+    })
+      .populate('author', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .populate('journal', 'name isPublic')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await JournalEntry.countDocuments({
+      journal: { $in: journalIds },
+      isPrivate: false,
+    });
+
+    res.json({
+      success: true,
+      data: entries,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching following entries',
+    });
+  }
+};
+
+// ==================== AI ANALYSIS & INSIGHTS ====================
+
+// @desc    Get insights and patterns
+// @route   GET /api/journal/insights
+// @access  Private
+export const getInsights = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const days = Math.min(Math.max(Number.parseInt(req.query.days as string, 10) || 30, 1), 365); // Between 1 and 365 days
+    const journalId = req.query.journalId as string;
+    
+    // Calculate start date more reliably
+    // We want to include entries from the last N days INCLUDING today
+    // So if days=7, we want entries from 7 days ago (at 00:00:00) until now
+    const now = new Date();
+    const startDate = new Date(now);
+    // Subtract days to get the start date (e.g., 7 days ago for 7-day period)
+    startDate.setDate(startDate.getDate() - days);
+    // Set to start of day (00:00:00) to include all entries from that day
+    startDate.setHours(0, 0, 0, 0);
+    startDate.setMinutes(0);
+    startDate.setSeconds(0);
+    startDate.setMilliseconds(0);
+
+    // Also set end date to end of today to ensure we include all of today's entries
+    const endDate = new Date(now);
+    endDate.setHours(23, 59, 59, 999);
+
+    // Debug logging
+    console.log(`[Insights] Fetching insights for ${days} days. Start date: ${startDate.toISOString()}, End date: ${endDate.toISOString()}, Now: ${now.toISOString()}`);
+
+    const query: any = {
+      author: req.userId,
+      createdAt: { 
+        $gte: startDate,
+        $lte: endDate,
+      },
+    };
+
+    if (journalId) {
+      query.journal = journalId;
+    }
+
+    const entries = await JournalEntry.find(query).sort({ createdAt: 1 });
+
+    // Debug logging to help diagnose the issue
+    if (days === 7) {
+      console.log(`[Insights Debug] 7 days query:`, {
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        startDateLocal: startDate.toLocaleString(),
+        endDateLocal: endDate.toLocaleString(),
+        query: JSON.stringify(query),
+        entriesFound: entries.length,
+        entryDates: entries.slice(0, 5).map(e => e.createdAt?.toISOString()),
+      });
+    }
+
+    if (entries.length === 0) {
+      res.json({
+        success: true,
+        data: {
+          totalEntries: 0,
+          averageMood: null,
+          moodTrend: [],
+          topThemes: [],
+          commonPatterns: [],
+          symptomFrequency: {},
+          streakDays: 0,
+        },
+      });
+      return;
+    }
+
+    // Calculate average mood
+    const totalMood = entries.reduce((sum, entry) => sum + entry.mood, 0);
+    const averageMood = totalMood / entries.length;
+
+    // Mood trend (group by date)
+    const moodByDate: { [key: string]: number[] } = {};
+    entries.forEach((entry) => {
+      if (entry.createdAt) {
+        const dateKey = entry.createdAt.toISOString().split('T')[0];
+        if (!moodByDate[dateKey]) {
+          moodByDate[dateKey] = [];
+        }
+        moodByDate[dateKey].push(entry.mood);
+      }
+    });
+
+    const moodTrend = Object.entries(moodByDate)
+      .map(([date, moods]) => ({
+        date,
+        mood: moods.reduce((sum, m) => sum + m, 0) / moods.length,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    // Top themes from AI insights
+    const themeCounts: { [key: string]: number } = {};
+    entries.forEach((entry) => {
+      if (entry.aiInsights?.themes) {
+        entry.aiInsights.themes.forEach((theme) => {
+          themeCounts[theme] = (themeCounts[theme] || 0) + 1;
+        });
+      }
+    });
+
+    const topThemes = Object.entries(themeCounts)
+      .map(([theme, count]) => ({ theme, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    // Common patterns
+    const patternCounts: { [key: string]: number } = {};
+    entries.forEach((entry) => {
+      if (entry.aiInsights?.cognitivePatterns) {
+        entry.aiInsights.cognitivePatterns.forEach((pattern) => {
+          patternCounts[pattern] = (patternCounts[pattern] || 0) + 1;
+        });
+      }
+    });
+
+    const commonPatterns = Object.entries(patternCounts)
+      .map(([pattern, count]) => ({ pattern, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    // Symptom frequency
+    const symptomFrequency: { [key: string]: { count: number; avgSeverity: string } } = {};
+    entries.forEach((entry) => {
+      entry.symptoms.forEach((symptom) => {
+        const key = symptom.type ? `${symptom.condition} (${symptom.type})` : symptom.condition;
+        if (!symptomFrequency[key]) {
+          symptomFrequency[key] = { count: 0, avgSeverity: symptom.severity };
+        }
+        symptomFrequency[key].count += 1;
+      });
+    });
+
+    // Calculate streak
+    let streakDays = 0;
+    const sortedEntries = [...entries]
+      .filter((e) => e.createdAt) // Filter out entries without createdAt
+      .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
+    let currentDate = new Date();
+    currentDate.setHours(0, 0, 0, 0);
+
+    for (const entry of sortedEntries) {
+      if (!entry.createdAt) continue;
+      const entryDate = new Date(entry.createdAt);
+      entryDate.setHours(0, 0, 0, 0);
+
+      if (entryDate.getTime() === currentDate.getTime()) {
+        streakDays++;
+        currentDate.setDate(currentDate.getDate() - 1);
+      } else if (entryDate.getTime() < currentDate.getTime()) {
+        break;
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalEntries: entries.length,
+        averageMood,
+        moodTrend,
+        topThemes,
+        commonPatterns,
+        symptomFrequency,
+        streakDays,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching insights',
+    });
+  }
+};
+
+// @desc    Get personalized prompt
+// @route   GET /api/journal/prompt
+// @access  Private
+export const getPrompt = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    // Get user's health info and recent entries for context
+    const user = await User.findById(req.userId).select('healthInfo');
+    const recentEntries = await JournalEntry.find({ author: req.userId })
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    const prompts: {
+      general: Array<{ id: string; text: string; category: string }>;
+      depression: Array<{ id: string; text: string; category: string }>;
+      anxiety: Array<{ id: string; text: string; category: string }>;
+      bipolar: Array<{ id: string; text: string; category: string }>;
+      trauma: Array<{ id: string; text: string; category: string }>;
+    } = {
+      general: [
+        { id: 'gen1', text: 'How are you feeling right now? Describe your emotions without judgment.', category: 'Reflection' },
+        { id: 'gen2', text: 'What was the best moment of today, no matter how small?', category: 'Gratitude' },
+        { id: 'gen3', text: 'If your current mood was a color, what would it be and why?', category: 'Creative' },
+        { id: 'gen4', text: 'What are you worried about right now? Write it down to release it.', category: 'Processing' },
+        { id: 'gen5', text: 'What did you do for yourself today?', category: 'Self-Care' },
+      ],
+      depression: [
+        { id: 'dep1', text: 'How was your energy level today on a scale of 1-10? What affected it?', category: 'Symptoms' },
+        { id: 'dep2', text: 'Name three things you are grateful for, no matter how small.', category: 'Gratitude' },
+        { id: 'dep3', text: 'What activity, no matter how small, brought a bit of joy today?', category: 'Behavioral Activation' },
+        { id: 'dep4', text: 'What negative thought came up today? Can you offer an alternative perspective?', category: 'CBT' },
+      ],
+      anxiety: [
+        { id: 'anx1', text: 'What worries came up today? How realistic are they on a scale of 1-10?', category: 'Worry' },
+        { id: 'anx2', text: 'Describe a moment of calm today. What made it soothing?', category: 'Grounding' },
+        { id: 'anx3', text: 'What physical sensations do you notice when you are anxious? Where in your body do you feel it?', category: 'Body Awareness' },
+        { id: 'anx4', text: 'Write about a situation you avoid. What is the worst that could happen?', category: 'Exposure' },
+      ],
+      bipolar: [
+        { id: 'bip1', text: 'How would you describe your mood today? Is there a pattern over the past few days?', category: 'Monitoring' },
+        { id: 'bip2', text: 'How was your sleep last night? Do you notice changes in your sleep pattern?', category: 'Sleep' },
+        { id: 'bip3', text: 'Do you have a lot of energy or very little? How does this affect your day?', category: 'Energy' },
+      ],
+      trauma: [
+        { id: 'trm1', text: 'What is a safe place in your thoughts where you can go right now?', category: 'Grounding' },
+        { id: 'trm2', text: 'What did you do today to take care of yourself?', category: 'Self-Care' },
+        { id: 'trm3', text: 'Describe five things you can see right now, four you can hear, three you can feel.', category: 'Grounding' },
+      ],
+    };
+
+    // Start with general prompts
+    let relevantPrompts = [...prompts.general];
+
+    // Add condition-specific prompts based on user's health info
+    if (user?.healthInfo) {
+      const mentalConditions = user.healthInfo.mentalHealth || [];
+      
+      mentalConditions.forEach((condition: any) => {
+        const conditionName = typeof condition === 'string' ? condition : condition.condition;
+        const conditionLower = conditionName.toLowerCase();
+        
+        if (conditionLower.includes('depress')) {
+          relevantPrompts = [...relevantPrompts, ...prompts.depression];
+        }
+        if (conditionLower.includes('anxiety') || conditionLower.includes('angst')) {
+          relevantPrompts = [...relevantPrompts, ...prompts.anxiety];
+        }
+        if (conditionLower.includes('bipolar') || conditionLower.includes('bipolair')) {
+          relevantPrompts = [...relevantPrompts, ...prompts.bipolar];
+        }
+        if (conditionLower.includes('trauma') || conditionLower.includes('ptsd') || conditionLower.includes('ptss')) {
+          relevantPrompts = [...relevantPrompts, ...prompts.trauma];
+        }
+      });
+    }
+
+    // Get recently used prompt IDs to avoid repetition
+    const recentPromptIds = recentEntries
+      .filter((e) => e.promptId)
+      .map((e) => e.promptId);
+
+    // Filter out recently used prompts
+    const unusedPrompts = relevantPrompts.filter((p) => !recentPromptIds.includes(p.id));
+    
+    // Use unused prompts if available, otherwise use all relevant prompts
+    const promptPool = unusedPrompts.length > 0 ? unusedPrompts : relevantPrompts;
+    
+    // Select a random prompt from the pool
+    const selectedPrompt = promptPool[Math.floor(Math.random() * promptPool.length)];
+
+    res.json({
+      success: true,
+      data: selectedPrompt,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching prompt',
+    });
+  }
+};
+
+// @desc    Trigger AI analysis on entry
+// @route   POST /api/journal/:id/analyze
+// @access  Private
+export const analyzeEntry = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const entry = await JournalEntry.findOne({
+      _id: req.params.id,
+      author: req.userId,
+    });
+
+    if (!entry) {
+      res.status(404).json({
+        success: false,
+        message: 'Journal entry not found',
+      });
+      return;
+    }
+
+    // Get user's health info and upcoming calendar events for context
+    const user = await User.findById(req.userId).select('healthInfo');
+    const now = new Date();
+    const upcomingEvents = await CalendarEvent.find({
+      user: req.userId,
+      startDate: { $gte: now },
+    })
+      .sort({ startDate: 1 })
+      .limit(10)
+      .lean();
+
+    // Get chat context for AI
+    const chatContexts = await ChatContext.find({ user: req.userId })
+      .sort({ sessionDate: -1 })
+      .limit(3)
+      .select('importantPoints summary sessionDate')
+      .lean();
+
+    // Format context for AI
+    const context = formatCompleteContextForAI(
+      user, 
+      undefined, 
+      upcomingEvents,
+      chatContexts.map(ctx => ({
+        importantPoints: ctx.importantPoints,
+        summary: ctx.summary,
+        sessionDate: ctx.sessionDate,
+      }))
+    );
+
+    const completion = await claude.messages.create({
+      model: 'claude-haiku-4-5',
+      system: `You are Aurora, a compassionate AI mental health assistant. Analyze journal entries and respond ONLY with a valid JSON object — no markdown, no extra text.
+
+JSON format:
+{
+  "sentiment": "positive" | "neutral" | "negative" | "mixed",
+  "themes": ["theme 1", "theme 2", "theme 3"],
+  "cognitivePatterns": ["pattern 1"],
+  "therapeuticFeedback": "A warm, supportive 2-3 sentence response to the person about their entry.",
+  "followUpQuestions": ["Question 1?", "Question 2?", "Question 3?"]
+}
+
+Rules:
+- sentiment: choose exactly one of: positive, neutral, negative, mixed
+- themes: 3-5 short labels (e.g. "Family conflict", "Anxiety about work")
+- cognitivePatterns: 0-3 items, only if clearly present (e.g. "Catastrophizing", "All-or-nothing thinking"). Empty array if none detected.
+- therapeuticFeedback: empathetic, non-clinical, 2-3 sentences. Acknowledge what they shared specifically.
+- followUpQuestions: exactly 3 open-ended questions to encourage self-reflection.
+${context}`,
+      max_tokens: 800,
+      temperature: 0.5,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Analyze this journal entry:\n\nMood: ${entry.mood}/10\n\nContent: ${entry.content}`,
+            },
+          ],
+        },
+      ],
+    });
+
+    const responseText =
+      completion.content
+        .filter(block => block.type === 'text')
+        .map(block => (block as any).text)
+        .join('') || '';
+
+    const insights: IAIInsights = {
+      sentiment: 'neutral',
+      themes: [],
+      cognitivePatterns: [],
+      therapeuticFeedback: '',
+      followUpQuestions: [],
+      analyzedAt: new Date(),
+    };
+
+    // Parse structured JSON response
+    try {
+      // Strip any accidental markdown code fences
+      const cleaned = responseText.replace(/```(?:json)?/gi, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      const validSentiments = ['positive', 'neutral', 'negative', 'mixed'];
+      if (validSentiments.includes(parsed.sentiment)) {
+        insights.sentiment = parsed.sentiment;
+      }
+      if (Array.isArray(parsed.themes)) {
+        insights.themes = parsed.themes.filter((t: any) => typeof t === 'string').slice(0, 5);
+      }
+      if (Array.isArray(parsed.cognitivePatterns)) {
+        insights.cognitivePatterns = parsed.cognitivePatterns.filter((p: any) => typeof p === 'string');
+      }
+      if (typeof parsed.therapeuticFeedback === 'string' && parsed.therapeuticFeedback.trim()) {
+        insights.therapeuticFeedback = parsed.therapeuticFeedback.trim();
+      }
+      if (Array.isArray(parsed.followUpQuestions)) {
+        insights.followUpQuestions = parsed.followUpQuestions.filter((q: any) => typeof q === 'string').slice(0, 3);
+      }
+
+      // Ensure feedback is always set
+      if (!insights.therapeuticFeedback) {
+        insights.therapeuticFeedback = responseText.substring(0, 500);
+      }
+    } catch (parseError) {
+      // Fallback: use raw response as feedback
+      insights.therapeuticFeedback = responseText.substring(0, 500);
+    }
+
+    entry.aiInsights = insights;
+    await entry.save();
+
+    res.json({
+      success: true,
+      data: entry,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error analyzing entry',
+    });
+  }
+};
+
+// @desc    Get journal context for Aurora
+// @route   GET /api/journal/aurora-context
+// @access  Private
+export const getAuroraContext = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const limit = parseLimit(req.query.limit as string, 5, 20); // Default 5, max 20 for suggestions
+    const journalId = req.query.journalId as string;
+
+    const query: any = { author: req.userId };
+    if (journalId) {
+      query.journal = journalId;
+    }
+
+    const entries = await JournalEntry.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .select('date mood content aiInsights.themes');
+
+    // Get upcoming calendar events for AI context
+    const now = new Date();
+    const upcomingEvents = await CalendarEvent.find({
+      user: req.userId,
+      startDate: { $gte: now },
+    })
+      .sort({ startDate: 1 })
+      .limit(10)
+      .lean();
+
+    const context = entries.map((entry) => ({
+      date: entry.createdAt ? entry.createdAt.toISOString() : new Date().toISOString(),
+      mood: entry.mood,
+      summary: entry.content.substring(0, 200),
+      themes: entry.aiInsights?.themes || [],
+      sentiment: entry.aiInsights?.sentiment,
+    }));
+
+    // Get chat context (important points from past sessions)
+    const chatContexts = await ChatContext.find({ user: req.userId })
+      .sort({ sessionDate: -1 })
+      .limit(3)
+      .select('importantPoints summary sessionDate')
+      .lean();
+
+    res.json({
+      success: true,
+      data: {
+        journalEntries: context,
+        calendarEvents: upcomingEvents,
+        chatContext: chatContexts.length > 0 ? chatContexts.map((ctx) => ({
+          importantPoints: ctx.importantPoints,
+          summary: ctx.summary,
+          sessionDate: ctx.sessionDate,
+        })) : [],
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching journal context',
+    });
+  }
+};
+
+// @desc    Finish chat session and extract important points
+// @route   POST /api/journal/finish-session
+// @access  Private
+export const finishChatSession = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { messages } = req.body;
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Messages are required',
+      });
+      return;
+    }
+
+    // Format conversation history for AI
+    const conversationText = messages
+      .map((msg: any) => {
+        const role = msg.role === 'user' ? 'User' : 'Aurora';
+        return `${role}: ${msg.content}`;
+      })
+      .join('\n\n');
+
+    // Get user's existing context for better extraction
+    const user = await User.findById(req.userId).select('healthInfo');
+    const existingContext = await ChatContext.find({ user: req.userId })
+      .sort({ sessionDate: -1 })
+      .limit(10)
+      .select('importantPoints summary')
+      .lean();
+
+    const existingContextText = existingContext.length > 0
+      ? `Previous important points from past sessions:\n${existingContext.map((ctx, idx) => `${idx + 1}. ${ctx.importantPoints.join(', ')}`).join('\n')}`
+      : '';
+
+    // Run point extraction and summary generation IN PARALLEL — cuts wait time roughly in half.
+    const [completion, summaryCompletion] = await Promise.all([
+    // ── Call 1: extract important points ────────────────────────────────────
+    claude.messages.create({
+      model: 'claude-haiku-4-5',
+      system: `You are Aurora, a compassionate AI mental health assistant. Your task is to extract the most important points from a chat conversation that should be remembered for future sessions.
+
+Extract 5-12 key points that capture:
+- Personal information the user shares (health conditions, diagnoses, personal circumstances, family, work, relationships, living situation, etc.)
+- Direct statements about their condition (e.g., "I have depression" → "User has depression")
+- Emotional patterns and mood shifts observed during this session (e.g., "User started anxious but became calmer discussing work plans")
+- New goals, intentions, or commitments the user expressed
+- Changes since previous sessions (new stressors, improvements, setbacks, new events)
+- Recurring themes or struggles that came up again
+- Specific triggers, coping strategies, or insights the user mentioned
+- Any personal details that help build a picture of this person's life
+
+CRITICAL RULES:
+- If the user explicitly states they have a condition (e.g., "I have Alzheimer's", "I have depression"), you MUST extract this.
+- Capture emotional tone changes: e.g., "User expressed hopelessness about work situation but showed resilience when discussing family."
+- Capture NEW information introduced this session, even if a similar topic was mentioned before.
+- DO NOT extract references to specific journal entries (e.g., "User's latest journal entry was about X") — journal data is fetched live.
+- Each point should be specific and meaningful, not generic filler.
+
+Format your response as a JSON object with a "points" array of strings, where each string is one important point (max 180 characters each).
+
+Example format:
+{"points": ["User has been diagnosed with Alzheimer's disease", "User struggles with anxiety in social situations and avoids group settings", "User expressed a goal to start therapy before end of the month", "User's mood improved noticeably when discussing their relationship with their sister", "User lives alone and has limited support network — loneliness is a recurring theme"]}
+
+${existingContextText ? `\n\n${existingContextText}\n\nAvoid duplicating points that are already captured, but DO include new personal information and emotional developments even if similar topics exist.` : ''}`,
+      max_tokens: 1000,
+      temperature: 0.5,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Extract important points from this conversation:\n\n${conversationText}`,
+            },
+          ],
+        },
+      ],
+    }),
+    // ── Call 2: session summary ──────────────────────────────────────────────
+    claude.messages.create({
+      model: 'claude-haiku-4-5',
+      system: `You are Aurora. Create a 2-3 sentence summary of this chat session. Include: (1) the main emotional theme or struggle discussed, (2) any significant shift in mood or insight that occurred, and (3) where the user left off emotionally. Write it as notes a therapist would keep — specific, human, and useful for the next session.`,
+      max_tokens: 200,
+      temperature: 0.4,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `Write session notes for this conversation:\n\n${conversationText}`,
+            },
+          ],
+        },
+      ],
+    }),
+    ]); // end Promise.all
+
+    const responseText =
+      completion.content
+        .filter(block => block.type === 'text')
+        .map(block => (block as any).text)
+        .join('') || '{}';
+    let importantPoints: string[] = [];
+
+    try {
+      const parsed = JSON.parse(responseText);
+      if (parsed.points && Array.isArray(parsed.points)) {
+        importantPoints = parsed.points.filter((p: any) => typeof p === 'string' && p.trim().length > 0);
+      } else if (Array.isArray(parsed)) {
+        importantPoints = parsed.filter((p: any) => typeof p === 'string' && p.trim().length > 0);
+      }
+    } catch (parseError) {
+      // Fallback: try to extract points from text
+      const lines = responseText.split('\n').filter((line: string) => line.trim().startsWith('-') || line.trim().match(/^\d+\./));
+      importantPoints = lines
+        .map((line: string) => line.replace(/^[-•\d.\s]+/, '').trim())
+        .filter((p: string) => p.length > 0 && p.length <= 100)
+        .slice(0, 7);
+    }
+
+    const summary =
+      summaryCompletion.content
+        .filter(block => block.type === 'text')
+        .map(block => (block as any).text)
+        .join('')
+        .trim() || '';
+
+    // Save to database
+    const chatContext = await ChatContext.create({
+      user: req.userId,
+      importantPoints: importantPoints.slice(0, 10), // Limit to 10 points to capture more personal details
+      summary: summary.substring(0, 1000),
+      sessionDate: new Date(),
+    });
+
+    // Respond to the user immediately — they don't need to wait for profile synthesis.
+    res.json({
+      success: true,
+      data: {
+        importantPoints: chatContext.importantPoints,
+        summary: chatContext.summary,
+        sessionDate: chatContext.sessionDate,
+      },
+    });
+
+    // ── RAG: embed and store each importantPoint as a memory vector ───────────
+    // Runs fire-and-forget in the background — zero user wait time.
+    // These vectors power the semantic memory retrieval at chat time.
+    if (chatContext.importantPoints && chatContext.importantPoints.length > 0 && req.userId) {
+      storeMemoryPoints(req.userId, chatContext.importantPoints, chatContext._id as any).catch(err => {
+        console.error('Error storing memory embeddings (non-critical):', err);
+      });
+    }
+
+    // Update or create long-term profile memory using AI synthesis.
+    // Runs IN THE BACKGROUND after the response is already sent — zero user wait time.
+    // Instead of raw string concatenation, we have Claude produce a structured
+    // psychological profile from all session data. This gives Aurora a genuine
+    // understanding of the person rather than a bullet-point dump.
+    try {
+      const recentContexts = await ChatContext.find({ user: req.userId })
+        .sort({ sessionDate: -1 })
+        .limit(20)
+        .select('importantPoints summary sessionDate')
+        .lean();
+
+      if (recentContexts.length > 0) {
+        // Build a rich input for the synthesis call
+        const sessionDataText = recentContexts
+          .map((ctx, i) => {
+            const date = ctx.sessionDate ? new Date(ctx.sessionDate).toLocaleDateString() : `Session ${recentContexts.length - i}`;
+            const points = (ctx.importantPoints || []).join('\n  - ');
+            const sumText = ctx.summary ? `\n  Summary: ${ctx.summary}` : '';
+            return `[${date}]\n  - ${points}${sumText}`;
+          })
+          .join('\n\n');
+
+        const profileSynthesisCompletion = await claude.messages.create({
+          model: 'claude-haiku-4-5',
+          system: `You are a clinical psychologist building a structured profile of a patient from their therapy session notes. Your profile will be used by an AI therapist to instantly understand who this person is at the start of each new session.
+
+Write a structured, insightful profile with these sections (use the exact headers):
+
+STABLE FACTS
+Confirmed, stable information about the person: age (if mentioned), occupation, living situation, family structure, diagnosed conditions, medications, major life circumstances.
+
+EMOTIONAL PATTERNS
+Recurring emotional themes, triggers, default coping responses, what tends to make them feel better or worse. Be specific.
+
+RECURRING THEMES
+Topics, situations, or concerns that keep appearing across sessions.
+
+KEY RELATIONSHIPS
+Important people in their life and the emotional significance of those relationships.
+
+GOALS & PROGRESS
+What the person is working toward. Any growth, setbacks, or shifts in goals observed over time.
+
+WHAT MATTERS MOST
+The 2-3 things that are most central to understanding this person's inner world and wellbeing.
+
+Guidelines:
+- Write in clear, empathetic clinical language. Use "the user" or "they."
+- Be specific — use details from the sessions. Do not write generic filler.
+- Keep the total profile under 2800 characters.
+- If there is not enough data for a section, write "Insufficient data yet."`,
+          max_tokens: 1200,
+          temperature: 0.3,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `Here are the session notes for this user across ${recentContexts.length} sessions:\n\n${sessionDataText}\n\nWrite the structured profile now.`,
+                },
+              ],
+            },
+          ],
+        });
+
+        const synthesizedProfile =
+          profileSynthesisCompletion.content
+            .filter((block: any) => block.type === 'text')
+            .map((block: any) => block.text)
+            .join('')
+            .trim();
+
+        // Also extract a deduplicated list of stable core facts from all points
+        const allPoints = recentContexts.flatMap(ctx => ctx.importantPoints || []);
+        const uniquePoints = Array.from(
+          new Set(
+            allPoints
+              .map(p => (p || '').trim())
+              .filter(p => p.length > 0)
+          )
+        ).slice(0, 50);
+
+        await UserProfileMemory.findOneAndUpdate(
+          { user: req.userId },
+          {
+            $set: {
+              coreFacts: uniquePoints,
+              narrativeSummary: synthesizedProfile.slice(0, 3000),
+            },
+          },
+          { upsert: true, new: true }
+        );
+      }
+    } catch (profileErr) {
+      console.error('Error updating UserProfileMemory:', profileErr);
+      // Profile update failure is silent — response already sent
+    }
+  } catch (error: any) {
+    console.error('Error finishing chat session:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error finishing chat session',
+    });
+  }
+};
+
+// @desc    Transcribe a journal voice note using OpenAI Whisper via backend
+// @route   POST /api/journal/transcribe-audio
+// @access  Private
+export const transcribeAudio = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { audioUrl, language = 'nl' } = req.body || {};
+
+    if (!audioUrl || typeof audioUrl !== 'string') {
+      res.status(400).json({
+        success: false,
+        message: 'audioUrl is required',
+      });
+      return;
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      res.status(503).json({
+        success: false,
+        message: 'Transcription service is not configured',
+      });
+      return;
+    }
+
+    // Fetch the audio file from storage (GridFS/Cloudflare) using Node 20+ global fetch
+    const audioResponse = await fetch(audioUrl);
+    if (!audioResponse.ok) {
+      const text = await audioResponse.text().catch(() => '');
+      console.error('Failed to fetch audio for transcription:', audioResponse.status, text);
+      res.status(502).json({
+        success: false,
+        message: 'Could not fetch audio file for transcription',
+      });
+      return;
+    }
+
+    const contentType = audioResponse.headers.get('content-type') || 'audio/m4a';
+    const arrayBuffer = await audioResponse.arrayBuffer();
+
+    // Use global FormData / Blob (Node 20+) via globalThis to avoid TS lib issues
+    const BlobCtor = (globalThis as any).Blob;
+    const FormDataCtor = (globalThis as any).FormData;
+
+    if (!BlobCtor || !FormDataCtor) {
+      console.error('Blob/FormData not available in this runtime');
+      res.status(500).json({
+        success: false,
+        message: 'Transcription not supported in this runtime environment',
+      });
+      return;
+    }
+
+    const blob = new BlobCtor([arrayBuffer], { type: contentType });
+    const formData = new FormDataCtor();
+    (formData as any).append('file', blob, 'recording.m4a');
+    (formData as any).append('model', 'whisper-1');
+    (formData as any).append('language', language);
+
+    const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: formData as any,
+    });
+
+    if (!whisperResponse.ok) {
+      const errorData = await whisperResponse.json().catch(() => ({}));
+      console.error('Whisper API error:', whisperResponse.status, errorData);
+      res.status(502).json({
+        success: false,
+        message: 'Transcription failed',
+      });
+      return;
+    }
+
+    const data = await whisperResponse.json();
+    const text = (data as any).text || '';
+
+    res.json({
+      success: true,
+      data: {
+        text,
+      },
+    });
+  } catch (error: any) {
+    console.error('Journal voice transcription error:', error);
+    res.status(500).json({
+      success: false,
+      message: error?.message || 'Error transcribing audio',
+    });
+  }
+};
+
+// @desc    Save chat context (important points already extracted on frontend)
+// @route   POST /api/journal/save-chat-context
+// @access  Private
+export const saveChatContext = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { importantPoints, summary, sessionDate } = req.body;
+
+    if (!importantPoints || !Array.isArray(importantPoints) || importantPoints.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'Important points are required',
+      });
+      return;
+    }
+
+    // Save the chat context
+    const chatContext = await ChatContext.create({
+      user: req.userId,
+      importantPoints: importantPoints.filter((p: string) => typeof p === 'string' && p.trim().length > 0),
+      summary: summary || '',
+      sessionDate: sessionDate ? new Date(sessionDate) : new Date(),
+    });
+
+    res.json({
+      success: true,
+      data: {
+        importantPoints: chatContext.importantPoints,
+        summary: chatContext.summary,
+        sessionDate: chatContext.sessionDate,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error saving chat context:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error saving chat context',
+    });
+  }
+};

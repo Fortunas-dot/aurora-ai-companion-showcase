@@ -1,0 +1,419 @@
+import { secureStorage } from '../utils/secureStorage';
+import { getApiUrl } from '../utils/apiUrl';
+
+interface ApiResponse<T = any> {
+  success: boolean;
+  data?: T;
+  message?: string;
+  pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    pages: number;
+  };
+}
+
+class ApiService {
+  private baseUrl: string;
+
+  constructor() {
+    this.baseUrl = getApiUrl();
+  }
+
+  /**
+   * Map low-level network errors to friendly, user-facing messages
+   */
+  private getNetworkErrorMessage(error: any): string {
+    const raw = error?.message || '';
+
+    // Generic React Native fetch error
+    if (!raw || raw === 'Network request failed') {
+      return 'Unable to connect to Aurora. Please check your internet connection and try again.';
+    }
+
+    // Timeouts are handled separately where possible, but keep a fallback here
+    if (raw.toLowerCase().includes('timeout')) {
+      return 'Request timed out. Please check your connection and try again.';
+    }
+
+    // DNS / host resolution issues
+    if (raw.toLowerCase().includes('hostname') || raw.toLowerCase().includes('failed to fetch')) {
+      return 'Cannot reach the server. Please check if you are online and try again.';
+    }
+
+    // Fallback to raw message
+    return raw;
+  }
+
+  /**
+   * Get the base URL for API requests
+   */
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
+  /**
+   * Get the authentication token
+   */
+  async getAuthToken(): Promise<string | null> {
+    return await secureStorage.getItemAsync('auth_token');
+  }
+
+  private async getAuthHeaders(): Promise<HeadersInit> {
+    const token = await secureStorage.getItemAsync('auth_token');
+    const headers: HeadersInit = {
+      'Content-Type': 'application/json',
+    };
+    
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    
+    return headers;
+  }
+
+  private async retryWithBackoff<T>(
+    fn: () => Promise<ApiResponse<T>>,
+    maxRetries: number = 3,
+    baseDelay: number = 1000
+  ): Promise<ApiResponse<T>> {
+    let lastResult: ApiResponse<T>;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      lastResult = await fn();
+      
+      // NEVER retry 429 errors - retrying makes the problem worse
+      // Return immediately on rate limit errors
+      if ((lastResult as any).status === 429) {
+        return lastResult;
+      }
+      
+      // Only retry on network errors or 5xx server errors (not 4xx client errors)
+      const status = (lastResult as any).status;
+      if (status && status >= 500 && attempt < maxRetries - 1) {
+        const delay = baseDelay * Math.pow(2, attempt); // Exponential backoff
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      
+      return lastResult;
+    }
+    
+    // If all retries failed, return the last result
+    return lastResult!;
+  }
+
+  async get<T = any>(endpoint: string, options?: { signal?: AbortSignal }): Promise<ApiResponse<T>> {
+    return this.retryWithBackoff(async () => {
+      try {
+        const headers = await this.getAuthHeaders();
+        
+        // Use provided signal or create a new one with timeout
+        const controller = options?.signal ? null : new AbortController();
+        const signal = options?.signal || controller!.signal;
+        const timeoutId = controller ? setTimeout(() => controller.abort(), 30000) : null; // 30 second timeout
+        
+        const response = await fetch(`${this.baseUrl}${endpoint}`, {
+          method: 'GET',
+          headers,
+          signal,
+        });
+        
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          
+          // For 429 errors, check rate limit headers
+          if (response.status === 429) {
+            const retryAfter = response.headers.get('Retry-After') || response.headers.get('RateLimit-Reset');
+            const message = retryAfter 
+              ? `Too many requests. Please try again after ${retryAfter} seconds.`
+              : errorData.message || 'Too many requests. Please try again later.';
+            
+            // Don't log 429 errors - they're expected when rate limits are hit
+            // The error will be handled gracefully by the calling code
+            
+            const apiResponse: ApiResponse<T> = {
+              success: false,
+              message,
+            };
+            (apiResponse as any).status = 429;
+            return apiResponse;
+          }
+          
+          // Only log non-404 and non-403 errors to reduce noise
+          // 403 errors are expected when users don't have permission
+          // 401 errors are expected when tokens are invalid/expired
+          if (response.status !== 404 && response.status !== 403 && response.status !== 401) {
+            console.error('API GET Error:', response.status, errorData);
+          }
+          
+          // For 401 and 403 errors, include status in response for token cleanup/auth handling
+          const apiResponse: ApiResponse<T> = {
+            success: false,
+            message: errorData.message || `HTTP ${response.status}`,
+          };
+          
+          // Attach status code for error handling
+          (apiResponse as any).status = response.status;
+          
+          return apiResponse;
+        }
+        
+        const data = await response.json();
+        return data;
+      } catch (error: any) {
+        // Handle AbortError (timeout) specifically
+        if (error.name === 'AbortError') {
+          console.error('API GET Error: Request timeout');
+          return {
+            success: false,
+            message: 'Request timeout. Please try again.',
+          };
+        }
+        console.error('API GET Error:', error);
+        return {
+          success: false,
+          message: this.getNetworkErrorMessage(error),
+        };
+      }
+    });
+  }
+
+  async post<T = any>(endpoint: string, body: any): Promise<ApiResponse<T>> {
+    try {
+      const headers = await this.getAuthHeaders();
+      
+      // Add timeout to prevent hanging requests
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+      
+      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      
+      // Check if response is JSON before parsing
+      const contentType = response.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+      
+      if (!response.ok) {
+        let errorData: any = {};
+        if (isJson) {
+          try {
+            errorData = await response.json();
+          } catch {
+            // If JSON parsing fails, use status text
+            errorData = { message: response.statusText || `HTTP ${response.status}` };
+          }
+        } else {
+          // If not JSON, read as text to avoid parse errors
+          const text = await response.text();
+          // Check if response is HTML (usually means route not found or server error)
+          if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+            errorData = { 
+              message: response.status === 404 
+                ? 'Endpoint not found. Please check if the backend is running and up to date.'
+                : `Server error (${response.status}). Please try again later.`
+            };
+          } else {
+          errorData = { message: text || response.statusText || `HTTP ${response.status}` };
+          }
+        }
+        
+        // Special-case 429 rate limit errors: don't spam console, give clear message
+        if (response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After') || response.headers.get('RateLimit-Reset');
+          const message = retryAfter
+            ? `Too many requests. Please try again after ${retryAfter} seconds.`
+            : errorData.message || 'Too many requests. Please try again later.';
+          
+          const apiResponse: ApiResponse<T> = {
+            success: false,
+            message,
+          };
+          (apiResponse as any).status = 429;
+          return apiResponse;
+        }
+        
+        // Only log non-404, non-403, and non-401 errors to reduce noise
+        // 403 errors are expected when users don't have permission
+        // 401 errors are expected when tokens are invalid/expired
+        // Also avoid logging expected validation/availability errors for SMS verification endpoints,
+        // since these are shown to the user as normal form errors.
+        const isSmsVerificationEndpoint =
+          endpoint.includes('/auth/send-verification-code') ||
+          endpoint.includes('/auth/verify-phone');
+
+        if (!isSmsVerificationEndpoint && response.status !== 404 && response.status !== 403 && response.status !== 401) {
+          console.error('API POST Error:', response.status, errorData);
+        }
+        
+        const apiResponse: ApiResponse<T> = {
+          success: false,
+          message: errorData.message || `HTTP ${response.status}`,
+        };
+        
+        // Attach status code for error handling
+        (apiResponse as any).status = response.status;
+        
+        return apiResponse;
+      }
+      
+      // Parse JSON response
+      if (isJson) {
+        const data = await response.json();
+        return data;
+      } else {
+        // If response is not JSON, return error
+        const text = await response.text();
+        return {
+          success: false,
+          message: `Expected JSON response but received: ${contentType || 'unknown'}`,
+        };
+      }
+    } catch (error: any) {
+      console.error('API POST Error:', error);
+      
+      // Handle abort/timeout errors
+      if (error.name === 'AbortError') {
+        return {
+          success: false,
+          message: 'Request timed out. Please try again.',
+        };
+      }
+      
+      return {
+        success: false,
+        message: this.getNetworkErrorMessage(error),
+      };
+    }
+  }
+
+  async put<T = any>(endpoint: string, body: any): Promise<ApiResponse<T>> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(body),
+      });
+      
+      // Check if response is JSON before parsing
+      const contentType = response.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+      
+      if (!response.ok) {
+        let errorData: any = {};
+        if (isJson) {
+          try {
+            errorData = await response.json();
+          } catch {
+            errorData = { message: response.statusText || `HTTP ${response.status}` };
+          }
+        } else {
+          const text = await response.text();
+          errorData = { message: text || response.statusText || `HTTP ${response.status}` };
+        }
+        
+        // Only log non-404, non-403, and non-401 errors to reduce noise
+        if (response.status !== 404 && response.status !== 403 && response.status !== 401) {
+          console.error('API PUT Error:', response.status, errorData);
+        }
+        
+        const apiResponse: ApiResponse<T> = {
+          success: false,
+          message: errorData.message || `HTTP ${response.status}`,
+        };
+        
+        (apiResponse as any).status = response.status;
+        return apiResponse;
+      }
+      
+      if (isJson) {
+        const data = await response.json();
+        return data;
+      } else {
+        const text = await response.text();
+        return {
+          success: false,
+          message: `Expected JSON response but received: ${contentType || 'unknown'}`,
+        };
+      }
+    } catch (error: any) {
+      console.error('API PUT Error:', error);
+      return {
+        success: false,
+        message: this.getNetworkErrorMessage(error),
+      };
+    }
+  }
+
+  async delete<T = any>(endpoint: string): Promise<ApiResponse<T>> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const response = await fetch(`${this.baseUrl}${endpoint}`, {
+        method: 'DELETE',
+        headers,
+      });
+      
+      // Check if response is JSON before parsing
+      const contentType = response.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+      
+      if (!response.ok) {
+        let errorData: any = {};
+        if (isJson) {
+          try {
+            errorData = await response.json();
+          } catch {
+            errorData = { message: response.statusText || `HTTP ${response.status}` };
+          }
+        } else {
+          const text = await response.text();
+          errorData = { message: text || response.statusText || `HTTP ${response.status}` };
+        }
+        
+        // Only log non-404, non-403, and non-401 errors to reduce noise
+        if (response.status !== 404 && response.status !== 403 && response.status !== 401) {
+          console.error('API DELETE Error:', response.status, errorData);
+        }
+        
+        const apiResponse: ApiResponse<T> = {
+          success: false,
+          message: errorData.message || `HTTP ${response.status}`,
+        };
+        
+        (apiResponse as any).status = response.status;
+        return apiResponse;
+      }
+      
+      // For DELETE, response might be empty (204 No Content)
+      if (response.status === 204 || !isJson) {
+        return {
+          success: true,
+        };
+      }
+      
+      const data = await response.json();
+      return data;
+    } catch (error: any) {
+      console.error('API DELETE Error:', error);
+      return {
+        success: false,
+        message: this.getNetworkErrorMessage(error),
+      };
+    }
+  }
+}
+
+export const apiService = new ApiService();
+export type { ApiResponse };
+

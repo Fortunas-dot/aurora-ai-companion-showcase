@@ -1,0 +1,300 @@
+import { getApiUrl } from '../utils/apiUrl';
+import { useAuthStore } from '../store/authStore';
+import { secureStorage } from '../utils/secureStorage';
+
+export type NotificationWebSocketEvent = 'notification' | 'unread_count' | 'error' | 'connected';
+
+export interface NotificationWebSocketCallbacks {
+  onNotification?: (notification: any) => void;
+  onUnreadCount?: (count: number) => void;
+  onError?: (error: Error) => void;
+  onConnected?: () => void;
+  onDisconnected?: () => void;
+}
+
+class NotificationWebSocketService {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 3000; // 3 seconds
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private callbacks: NotificationWebSocketCallbacks = {};
+  private isConnecting = false;
+
+  /**
+   * Connect to notification WebSocket
+   */
+  async connect(callbacks: NotificationWebSocketCallbacks): Promise<void> {
+    // If already connected, just update callbacks
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      console.log('WebSocket already connected, updating callbacks');
+      this.callbacks = callbacks;
+      return;
+    }
+
+    // If connecting, just update callbacks and return
+    if (this.isConnecting) {
+      console.log('WebSocket connection already in progress, updating callbacks');
+      this.callbacks = callbacks; // Update callbacks anyway
+      return;
+    }
+
+    // Clean up any existing connection that's not open
+    if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+      try {
+        this.ws.close();
+      } catch (error) {
+        // Ignore close errors
+      }
+      this.ws = null;
+    }
+
+    this.callbacks = callbacks;
+    this.isConnecting = true;
+
+    try {
+      const token = await secureStorage.getItemAsync('auth_token');
+      if (!token) {
+        // Silently fail if no token - user might not be logged in yet
+        console.log('No auth token available, skipping WebSocket connection');
+        this.isConnecting = false;
+        this.callbacks.onError?.(new Error('No auth token available'));
+        return;
+      }
+
+      const baseUrl = getApiUrl().replace('/api', '');
+      const wsUrl = baseUrl.replace('http://', 'ws://').replace('https://', 'wss://');
+      const url = `${wsUrl}/ws/notifications?token=${token}`;
+
+      console.log('Connecting to notification WebSocket:', url);
+
+      this.ws = new WebSocket(url);
+
+      this.ws.onopen = () => {
+        console.log('✅ Notification WebSocket connected');
+        this.isConnecting = false;
+        this.reconnectAttempts = 0;
+        this.callbacks.onConnected?.();
+        // Re-report current screen so presence survives reconnects.
+        this.resendPresence();
+      };
+
+      this.ws.onmessage = (event) => {
+        try {
+          // Parse message - backend sends JSON
+          const data = JSON.parse(event.data);
+          this.handleMessage(data);
+        } catch (error) {
+          // If parsing fails, check if it's a plain text ping/pong (fallback)
+          if (typeof event.data === 'string') {
+            const text = event.data.trim();
+            if (text === 'ping') {
+              if (this.ws?.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify({ type: 'pong' }));
+              }
+              return;
+            }
+            if (text === 'pong') {
+              return; // Ignore pong silently
+            }
+          }
+          // Only log non-ping/pong parsing errors
+          if (__DEV__) {
+            console.warn('Error parsing WebSocket message:', error);
+          }
+        }
+      };
+
+      this.ws.onerror = (event) => {
+        // WebSocket onerror receives an Event object, not an Error
+        // Extract meaningful error information
+        const errorMessage = 'WebSocket connection error';
+        if (__DEV__) {
+          console.warn('Notification WebSocket error:', errorMessage);
+        }
+        this.isConnecting = false;
+        this.callbacks.onError?.(new Error(errorMessage));
+      };
+
+      this.ws.onclose = (event) => {
+        console.log('Notification WebSocket disconnected', event.code, event.reason);
+        this.isConnecting = false;
+        this.callbacks.onDisconnected?.();
+        
+        // Don't reconnect on:
+        // - Code 1000: Normal closure (manual disconnect)
+        // - Code 1005: No status received (server timeout/network issue - don't spam reconnect)
+        // - Code 1002: Protocol error (don't reconnect)
+        // - Code 1003: Unsupported data (don't reconnect)
+        // - Code 1007: Invalid data (don't reconnect)
+        // - Code 1008: Policy violation (don't reconnect)
+        // - Code 1009: Message too big (don't reconnect)
+        // - Code 1010: Extension error (don't reconnect)
+        // - Code 1015: TLS handshake failure (don't reconnect)
+        
+        const shouldReconnect = 
+          event.code !== 1000 && // Not manual close
+          event.code !== 1005 && // Not no status (server timeout - wait for user action)
+          event.code !== 1002 && // Not protocol error
+          event.code !== 1003 && // Not unsupported data
+          event.code !== 1007 && // Not invalid data
+          event.code !== 1008 && // Not policy violation
+          event.code !== 1009 && // Not message too big
+          event.code !== 1010 && // Not extension error
+          event.code !== 1015 && // Not TLS handshake failure
+          this.reconnectAttempts < this.maxReconnectAttempts;
+        
+        if (shouldReconnect) {
+          this.attemptReconnect();
+        } else if (event.code === 1005) {
+          // Code 1005 means server closed without close frame (likely timeout)
+          // Don't spam reconnect, just log it
+          console.log('Notification WebSocket closed by server (likely timeout). Will reconnect on next user action.');
+        }
+      };
+    } catch (error) {
+      // Only log non-token errors as errors, token errors are expected
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('No auth token available')) {
+        console.log('No auth token available, skipping WebSocket connection');
+      } else {
+        console.error('Error connecting to notification WebSocket:', error);
+      }
+      this.isConnecting = false;
+      this.callbacks.onError?.(error as Error);
+    }
+  }
+
+  /**
+   * Handle incoming WebSocket messages
+   */
+  private handleMessage(data: any): void {
+    // Handle ping/pong heartbeat messages silently
+    if (data.type === 'ping') {
+      // Respond to ping with pong if WebSocket is open
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({ type: 'pong' }));
+        } catch (error) {
+          console.warn('Failed to send pong response:', error);
+        }
+      }
+      return;
+    }
+
+    if (data.type === 'pong') {
+      // Heartbeat response, ignore silently
+      return;
+    }
+
+    switch (data.type) {
+      case 'notification':
+        this.callbacks.onNotification?.(data.notification);
+        break;
+      case 'unread_count':
+        this.callbacks.onUnreadCount?.(data.count);
+        break;
+      case 'error':
+        this.callbacks.onError?.(new Error(data.message));
+        break;
+      default:
+        // Only log if it's not a ping/pong message
+        if (data.type && data.type !== 'ping' && data.type !== 'pong') {
+          console.log('Unknown WebSocket message type:', data.type);
+        }
+    }
+  }
+
+  /**
+   * Attempt to reconnect to WebSocket
+   */
+  private attemptReconnect(): void {
+    // Don't reconnect if already connecting or if WebSocket is still open
+    if (this.isConnecting || this.ws?.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.log('Max reconnection attempts reached for notification WebSocket');
+      return;
+    }
+
+    // Clear any existing reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    this.reconnectAttempts++;
+    const delay = Math.min(this.reconnectDelay * this.reconnectAttempts, 30000); // Max 30 seconds
+
+    console.log(`Attempting to reconnect notification WebSocket in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+    this.reconnectTimer = setTimeout(() => {
+      // Check again before reconnecting - make sure we still need to reconnect
+      if (!this.isConnecting && this.ws?.readyState !== WebSocket.OPEN && this.ws?.readyState !== WebSocket.CONNECTING) {
+        if (this.callbacks.onConnected || this.callbacks.onNotification) {
+          this.connect(this.callbacks);
+        }
+      }
+    }, delay);
+  }
+
+  /**
+   * Disconnect from WebSocket
+   */
+  disconnect(): void {
+    // Clear reconnect timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Close WebSocket connection
+    if (this.ws) {
+      try {
+        // Use code 1000 (normal closure) to indicate manual disconnect
+        this.ws.close(1000, 'Manual disconnect');
+      } catch (error) {
+        // Ignore close errors
+      }
+      this.ws = null;
+    }
+
+    this.reconnectAttempts = 0;
+    this.isConnecting = false;
+  }
+
+  /**
+   * Check if WebSocket is connected
+   */
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Report the screen/route the user is currently viewing, for live-presence
+   * tracking on the admin dashboard. Best-effort: silently skips if the socket
+   * isn't open (it will be re-sent on the next navigation / reconnect).
+   * We remember the last screen so it can be re-sent automatically on reconnect.
+   */
+  private lastScreen: string | null = null;
+
+  sendPresence(screen: string): void {
+    this.lastScreen = screen;
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    try {
+      this.ws.send(JSON.stringify({ type: 'presence', screen }));
+    } catch (error) {
+      if (__DEV__) console.warn('Failed to send presence:', error);
+    }
+  }
+
+  /** Re-send the last known screen (used after (re)connect). */
+  resendPresence(): void {
+    if (this.lastScreen) this.sendPresence(this.lastScreen);
+  }
+}
+
+export const notificationWebSocketService = new NotificationWebSocketService();
+

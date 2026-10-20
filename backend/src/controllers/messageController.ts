@@ -1,0 +1,590 @@
+import { Response } from 'express';
+import Message from '../models/Message';
+import Notification from '../models/Notification';
+import User from '../models/User';
+import { AuthRequest } from '../middleware/auth';
+import { broadcastMessageReaction } from './chatWebSocket';
+import mongoose from 'mongoose';
+import { sendNotificationToUser, sendUnreadCountUpdate } from './notificationWebSocket';
+import { escapeRegex } from '../utils/helpers';
+import { parsePage, parseLimit, calculateSkip } from '../utils/pagination';
+
+// Helper function to normalize URLs to absolute URLs
+const normalizeUrl = (url: string | undefined | null): string | undefined => {
+  if (!url) return undefined;
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  const baseUrl = process.env.BASE_URL || 'https://aurora-production.up.railway.app';
+  const relativeUrl = url.startsWith('/') ? url : `/${url}`;
+  return `${baseUrl}${relativeUrl}`;
+};
+
+// Helper function to normalize message data (attachments and user avatars)
+const normalizeMessageData = (message: any): any => {
+  if (!message) return message;
+  
+  const normalized: any = { ...message };
+  
+  // Normalize attachments array
+  if (message.attachments && Array.isArray(message.attachments)) {
+    normalized.attachments = message.attachments.map((attachment: any) => ({
+      ...attachment,
+      url: normalizeUrl(attachment.url) || attachment.url,
+    }));
+  }
+  
+  // Normalize sender avatar
+  if (message.sender && message.sender.avatar) {
+    normalized.sender = {
+      ...message.sender,
+      avatar: normalizeUrl(message.sender.avatar),
+    };
+  }
+  
+  // Normalize receiver avatar
+  if (message.receiver && message.receiver.avatar) {
+    normalized.receiver = {
+      ...message.receiver,
+      avatar: normalizeUrl(message.receiver.avatar),
+    };
+  }
+  
+  return normalized;
+};
+
+// @desc    Get all conversations
+// @route   GET /api/messages/conversations
+// @access  Private
+export const getConversations = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = new mongoose.Types.ObjectId(req.userId);
+
+    const [currentUser, usersWhoBlockedMe] = await Promise.all([
+      User.findById(userId).select('blockedUsers').lean(),
+      User.find({ blockedUsers: userId }).select('_id').lean(),
+    ]);
+
+    const blockedByMe = new Set(
+      (currentUser?.blockedUsers || []).map((id: any) => id.toString())
+    );
+    const blockedMe = new Set(
+      (usersWhoBlockedMe || []).map((u: any) => u._id.toString())
+    );
+
+    // Get latest message from each conversation
+    const conversations = await Message.aggregate([
+      {
+        $match: {
+          $or: [{ sender: userId }, { receiver: userId }],
+        },
+      },
+      {
+        $sort: { createdAt: -1 },
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $eq: ['$sender', userId] },
+              '$receiver',
+              '$sender',
+            ],
+          },
+          lastMessage: { $first: '$$ROOT' },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $eq: ['$receiver', userId] },
+                    { $eq: ['$readAt', null] },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'user',
+        },
+      },
+      {
+        $unwind: '$user',
+      },
+      {
+        $project: {
+          user: {
+            _id: '$user._id',
+            username: '$user.username',
+            displayName: '$user.displayName',
+            avatar: '$user.avatar',
+            avatarCharacter: '$user.avatarCharacter',
+            avatarBackgroundColor: '$user.avatarBackgroundColor',
+            pixelCharacter: '$user.pixelCharacter',
+          },
+          lastMessage: {
+            _id: '$lastMessage._id',
+            content: '$lastMessage.content',
+            attachments: '$lastMessage.attachments',
+            createdAt: '$lastMessage.createdAt',
+            isOwn: { $eq: ['$lastMessage.sender', userId] },
+          },
+          unreadCount: 1,
+        },
+      },
+      {
+        $sort: { 'lastMessage.createdAt': -1 },
+      },
+    ]);
+
+    // Normalize URLs in conversations; omit anyone in a block relationship (either direction)
+    const normalizedConversations = conversations
+      .map((conv: any) => {
+        const normalized = { ...conv };
+
+        // Normalize user avatar
+        if (normalized.user?.avatar) {
+          normalized.user.avatar = normalizeUrl(normalized.user.avatar);
+        }
+
+        // Normalize attachments in lastMessage
+        if (normalized.lastMessage?.attachments && Array.isArray(normalized.lastMessage.attachments)) {
+          normalized.lastMessage.attachments = normalized.lastMessage.attachments.map((attachment: any) => ({
+            ...attachment,
+            url: normalizeUrl(attachment.url) || attachment.url,
+          }));
+        }
+
+        return normalized;
+      })
+      .filter((conv: any) => {
+        const otherId = conv.user?._id != null ? String(conv.user._id) : '';
+        if (!otherId) return false;
+        return !blockedByMe.has(otherId) && !blockedMe.has(otherId);
+      });
+
+    res.json({
+      success: true,
+      data: normalizedConversations,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching conversations',
+    });
+  }
+};
+
+// @desc    Get messages with a user
+// @route   GET /api/messages/conversation/:userId
+// @access  Private
+export const getConversation = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const page = parsePage(req.query.page as string);
+    const limit = parseLimit(req.query.limit as string, 50, 100); // Default 50, max 100 for messages
+    const skip = calculateSkip(page, limit);
+
+    const otherUserId = req.params.userId;
+
+    const messages = await Message.find({
+      $or: [
+        { sender: req.userId, receiver: otherUserId },
+        { sender: otherUserId, receiver: req.userId },
+      ],
+    })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate('sender', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter nameColor')
+      .populate('receiver', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter nameColor');
+
+    const total = await Message.countDocuments({
+      $or: [
+        { sender: req.userId, receiver: otherUserId },
+        { sender: otherUserId, receiver: req.userId },
+      ],
+    });
+
+    // Mark messages as read
+    await Message.updateMany(
+      {
+        sender: otherUserId,
+        receiver: req.userId,
+        readAt: null,
+      },
+      { readAt: new Date() }
+    );
+
+    // Ensure attachments are properly serialized and normalize URLs
+    const serializedMessages = messages.reverse().map((msg: any) => {
+      const msgObj = msg.toObject ? msg.toObject() : msg;
+      const messageWithAttachments = {
+        ...msgObj,
+        attachments: msgObj.attachments || [], // Ensure attachments is always an array
+      };
+      // Normalize URLs in message (attachments and user avatars)
+      return normalizeMessageData(messageWithAttachments);
+    });
+
+    res.json({
+      success: true,
+      data: serializedMessages, // Return in chronological order
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error fetching messages',
+    });
+  }
+};
+
+// @desc    Send message
+// @route   POST /api/messages
+// @access  Private
+export const sendMessage = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { receiverId, content, attachments } = req.body;
+
+    if (receiverId === req.userId) {
+      res.status(400).json({
+        success: false,
+        message: 'Cannot send message to yourself',
+      });
+      return;
+    }
+
+    // Validate that we have either content or attachments
+    const hasContent = content && typeof content === 'string' && content.trim().length > 0;
+    const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+    
+    if (!hasContent && !hasAttachments) {
+      res.status(400).json({
+        success: false,
+        message: 'Message must have either content or attachments',
+      });
+      return;
+    }
+
+    // Prevent sending messages when there is a block relationship
+    // - If current user has blocked the receiver
+    // - Or if receiver has blocked the current user
+    const [currentUser, targetUser] = await Promise.all([
+      User.findById(req.userId).select('blockedUsers'),
+      User.findById(receiverId).select('blockedUsers'),
+    ]);
+
+    const currentUserId = req.userId!.toString();
+    const hasBlockedReceiver = currentUser?.blockedUsers?.some(
+      (id: any) => id.toString() === receiverId
+    );
+    const isBlockedByReceiver = targetUser?.blockedUsers?.some(
+      (id: any) => id.toString() === currentUserId
+    );
+
+    if (hasBlockedReceiver || isBlockedByReceiver) {
+      res.status(403).json({
+        success: false,
+        message: 'You cannot send messages to this user.',
+      });
+      return;
+    }
+
+    // Normalize attachment URLs before storing in database
+    const normalizedAttachments = Array.isArray(attachments) 
+      ? attachments.map((attachment: any) => ({
+          ...attachment,
+          url: normalizeUrl(attachment.url) || attachment.url,
+        }))
+      : [];
+
+    const message = await Message.create({
+      sender: req.userId,
+      receiver: receiverId,
+      content: content || '',
+      attachments: normalizedAttachments,
+    });
+
+    await message.populate('sender', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+    await message.populate('receiver', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+
+    // Create notification
+    const notification = await Notification.create({
+      user: receiverId,
+      type: 'message',
+      relatedUser: req.userId,
+      message: 'sent you a message',
+    });
+
+    await notification.populate('relatedUser', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter nameColor');
+
+    // Send notification via WebSocket
+    await sendNotificationToUser(receiverId, notification);
+    await sendUnreadCountUpdate(receiverId);
+
+    // Ensure attachments are included in response and normalize URLs
+    const messageObj = message.toObject ? message.toObject() : message;
+    const messageWithAttachments = {
+      ...messageObj,
+      attachments: messageObj.attachments || [], // Ensure attachments is always an array
+    };
+    // Normalize URLs in message (attachments and user avatars)
+    const normalizedMessage = normalizeMessageData(messageWithAttachments);
+
+    res.status(201).json({
+      success: true,
+      data: normalizedMessage,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error sending message',
+    });
+  }
+};
+
+// @desc    Mark message as read
+// @route   PUT /api/messages/:id/read
+// @access  Private
+// @desc    React to a message
+// @route   POST /api/messages/:id/react
+// @access  Private
+export const reactToMessage = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { emoji } = req.body;
+
+    if (!emoji) {
+      res.status(400).json({
+        success: false,
+        message: 'Emoji is required',
+      });
+      return;
+    }
+
+    const message = await Message.findById(req.params.id);
+
+    if (!message) {
+      res.status(404).json({
+        success: false,
+        message: 'Message not found',
+      });
+      return;
+    }
+
+    // Check if user is part of this conversation
+    if (
+      message.sender.toString() !== req.userId &&
+      message.receiver.toString() !== req.userId
+    ) {
+      res.status(403).json({
+        success: false,
+        message: 'Not authorized',
+      });
+      return;
+    }
+
+    // Initialize reactions array if it doesn't exist
+    if (!message.reactions) {
+      message.reactions = [];
+    }
+
+    // Find existing reaction with this emoji
+    const existingReaction = message.reactions.find(
+      (r) => r.emoji === emoji
+    );
+
+    if (existingReaction) {
+      // Toggle: if user already reacted, remove; otherwise add
+      const userIndex = existingReaction.users.findIndex(
+        (userId) => userId.toString() === req.userId
+      );
+
+      if (userIndex > -1) {
+        // Remove reaction
+        existingReaction.users.splice(userIndex, 1);
+        // Remove reaction if no users left
+        if (existingReaction.users.length === 0) {
+          message.reactions = message.reactions.filter(
+            (r) => r.emoji !== emoji
+          );
+        }
+      } else {
+        // Add reaction
+        existingReaction.users.push(new mongoose.Types.ObjectId(req.userId));
+      }
+    } else {
+      // Create new reaction
+      message.reactions.push({
+        emoji,
+        users: [new mongoose.Types.ObjectId(req.userId)],
+      });
+    }
+
+    await message.save();
+
+    // Populate all necessary fields for response
+    await message.populate('sender', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+    await message.populate('receiver', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter');
+    await message.populate('reactions.users', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter nameColor');
+
+    // Convert to plain object to ensure proper serialization
+    const messageObj = message.toObject ? message.toObject() : message;
+    
+    // Broadcast reaction update via WebSocket to both users
+    // Pass the full message object with all populated fields
+    await broadcastMessageReaction(messageObj);
+
+    // Normalize URLs in message (attachments and user avatars)
+    const normalizedMessage = normalizeMessageData(messageObj);
+
+    res.json({
+      success: true,
+      data: normalizedMessage,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error reacting to message',
+    });
+  }
+};
+
+// @desc    Search messages in a conversation
+// @route   GET /api/messages/conversation/:userId/search
+// @access  Private
+export const searchMessages = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { q } = req.query;
+    const { userId } = req.params;
+
+    if (!q || typeof q !== 'string') {
+      res.status(400).json({
+        success: false,
+        message: 'Search query is required',
+      });
+      return;
+    }
+
+    const searchQuery = {
+      $or: [
+        { sender: req.userId, receiver: userId },
+        { sender: userId, receiver: req.userId },
+      ],
+      content: { $regex: escapeRegex(q), $options: 'i' },
+    };
+
+    const messages = await Message.find(searchQuery)
+      .populate('sender', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .populate('receiver', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .populate('reactions.users', 'username displayName avatar avatarCharacter avatarBackgroundColor pixelCharacter')
+      .sort({ createdAt: -1 })
+      .limit(50);
+
+    // Normalize URLs in all messages
+    const normalizedMessages = messages.map((msg: any) => {
+      const msgObj = msg.toObject ? msg.toObject() : msg;
+      return normalizeMessageData(msgObj);
+    });
+
+    res.json({
+      success: true,
+      data: normalizedMessages,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error searching messages',
+    });
+  }
+};
+
+export const markAsRead = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const message = await Message.findById(req.params.id);
+
+    if (!message) {
+      res.status(404).json({
+        success: false,
+        message: 'Message not found',
+      });
+      return;
+    }
+
+    // Only receiver can mark as read
+    if (message.receiver.toString() !== req.userId) {
+      res.status(403).json({
+        success: false,
+        message: 'Not authorized',
+      });
+      return;
+    }
+
+    message.readAt = new Date();
+    await message.save();
+
+    res.json({
+      success: true,
+      data: message,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error marking message as read',
+    });
+  }
+};
+
+// @desc    Delete an entire conversation between the current user and another user
+// @route   DELETE /api/messages/conversation/:userId
+// @access  Private
+export const deleteConversation = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const otherUserId = req.params.userId;
+
+    if (!otherUserId || !mongoose.Types.ObjectId.isValid(otherUserId)) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid user ID',
+      });
+      return;
+    }
+
+    const result = await Message.deleteMany({
+      $or: [
+        { sender: req.userId, receiver: otherUserId },
+        { sender: otherUserId, receiver: req.userId },
+      ],
+    });
+
+    res.json({
+      success: true,
+      data: {
+        deletedCount: (result as any).deletedCount ?? 0,
+      },
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error deleting conversation',
+    });
+  }
+};
+
+
+
+
+
+

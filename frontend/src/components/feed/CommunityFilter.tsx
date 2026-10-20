@@ -1,0 +1,368 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Pressable,
+} from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from '../../constants/theme';
+import { groupService, Group } from '../../services/group.service';
+import { LoadingSpinner } from '../common';
+
+interface CommunityFilterProps {
+  selectedCommunity: string | null;
+  onCommunityChange: (communityId: string | null) => void;
+  isAuthenticated: boolean;
+  showAllPublicPosts?: boolean;
+  onShowAllPublicPostsChange?: (show: boolean) => void;
+}
+
+export const CommunityFilter: React.FC<CommunityFilterProps> = React.memo(({
+  selectedCommunity,
+  onCommunityChange,
+  isAuthenticated,
+  showAllPublicPosts = false,
+  onShowAllPublicPostsChange,
+}) => {
+  const [communities, setCommunities] = useState<Group[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [shouldShowEmptyState, setShouldShowEmptyState] = useState(false);
+  const isLoadingRef = useRef(false);
+  const hasLoadedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const loadAttemptedRef = useRef(false);
+  // Track if we've ever had communities - once we have communities, never show empty state again
+  const hasEverHadCommunitiesRef = useRef(false);
+  // Track if we've already determined the empty state - prevent re-evaluation
+  const emptyStateDeterminedRef = useRef(false);
+  // Track communities length to avoid dependency issues
+  const communitiesLengthRef = useRef(0);
+
+  const loadCommunities = useCallback(async () => {
+    // CRITICAL FIX: If we've already determined there are no communities, NEVER load again
+    // This prevents any reloading attempts, even if the function is called
+    if (emptyStateDeterminedRef.current && communitiesLengthRef.current === 0 && !hasEverHadCommunitiesRef.current) {
+      console.log('🚫 Skipping loadCommunities - already determined no communities exist');
+      return;
+    }
+    
+    // Prevent multiple simultaneous loads
+    if (isLoadingRef.current || !mountedRef.current) {
+      return;
+    }
+    
+    isLoadingRef.current = true;
+    // Only show the loading spinner on the very first load.
+    // After we've determined the empty state once, keep the UI stable
+    // so "No communities yet" doesn't visibly reappear/reload.
+    if (!hasLoadedRef.current) {
+      setIsLoading(true);
+    }
+    loadAttemptedRef.current = true;
+    
+    try {
+      const response = await groupService.getGroups(1, 100);
+      if (!mountedRef.current) return;
+      
+      if (response.success && response.data) {
+        // Filter to show only groups where user is a member
+        const userCommunities = response.data.filter((group) => group.isMember);
+        communitiesLengthRef.current = userCommunities.length;
+        setCommunities(userCommunities);
+        // Track if we've ever had communities
+        if (userCommunities.length > 0) {
+          hasEverHadCommunitiesRef.current = true;
+          // Hide empty state if we now have communities
+          if (mountedRef.current) {
+            setShouldShowEmptyState(false);
+            // Only mark as determined if we haven't already
+            if (!emptyStateDeterminedRef.current) {
+              emptyStateDeterminedRef.current = true;
+            }
+          }
+        } else {
+          // Show empty state only if we've never had communities and haven't determined it yet
+          if (mountedRef.current && !hasEverHadCommunitiesRef.current && !emptyStateDeterminedRef.current) {
+            setShouldShowEmptyState(true);
+            emptyStateDeterminedRef.current = true;
+            // CRITICAL: Mark loadAttempted as true to prevent any future loads
+            loadAttemptedRef.current = true;
+          }
+        }
+      } else {
+        communitiesLengthRef.current = 0;
+        setCommunities([]);
+        // Show empty state only if we've never had communities and haven't determined it yet
+        if (mountedRef.current && !hasEverHadCommunitiesRef.current && !emptyStateDeterminedRef.current) {
+          setShouldShowEmptyState(true);
+          emptyStateDeterminedRef.current = true;
+          // CRITICAL: Mark loadAttempted as true to prevent any future loads
+          loadAttemptedRef.current = true;
+        }
+      }
+    } catch (error) {
+      if (!mountedRef.current) return;
+      console.error('Error loading communities:', error);
+      communitiesLengthRef.current = 0;
+      setCommunities([]);
+      // Show empty state only if we've never had communities and haven't determined it yet
+      if (!hasEverHadCommunitiesRef.current && !emptyStateDeterminedRef.current) {
+        setShouldShowEmptyState(true);
+        emptyStateDeterminedRef.current = true;
+        // CRITICAL: Mark loadAttempted as true to prevent any future loads
+        loadAttemptedRef.current = true;
+      }
+    } finally {
+      if (mountedRef.current) {
+        isLoadingRef.current = false;
+        // Ensure we always mark that an initial load has happened
+        if (!hasLoadedRef.current) {
+          hasLoadedRef.current = true;
+          setHasLoaded(true);
+        }
+        // Always clear the loading state; if it was never set (subsequent calls),
+        // this is a no-op and keeps the UI from flickering.
+        setIsLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    
+    // CRITICAL: If we've already determined there are no communities, NEVER load again
+    // This is the key fix - once we know there are no communities, stop all loading attempts
+    if (emptyStateDeterminedRef.current && communitiesLengthRef.current === 0 && !hasEverHadCommunitiesRef.current) {
+      // We already know there are no communities - do NOTHING, don't reload
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+    
+    // Only load if authenticated and not already loaded/attempted
+    if (isAuthenticated && !loadAttemptedRef.current) {
+      loadCommunities();
+    } else if (!isAuthenticated) {
+      // Reset only if we were authenticated before
+      if (hasLoadedRef.current) {
+        communitiesLengthRef.current = 0;
+        setCommunities([]);
+        hasLoadedRef.current = false;
+        setHasLoaded(false);
+        loadAttemptedRef.current = false;
+        hasEverHadCommunitiesRef.current = false;
+        emptyStateDeterminedRef.current = false;
+        setShouldShowEmptyState(false);
+        setIsLoading(false);
+      }
+    }
+    
+    return () => {
+      mountedRef.current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAuthenticated]);
+
+  // Reload communities when screen comes into focus
+  // This ensures that if a user joins a community from another screen,
+  // the communities list will be refreshed when they return to the feed
+  useFocusEffect(
+    useCallback(() => {
+      if (isAuthenticated && mountedRef.current) {
+        // Force reload by resetting the blocking refs
+        // This allows communities to be refreshed even if we previously determined there were none
+        const shouldReload = emptyStateDeterminedRef.current && communitiesLengthRef.current === 0;
+        
+        if (shouldReload) {
+          // Reset refs to allow reloading
+          emptyStateDeterminedRef.current = false;
+          loadAttemptedRef.current = false;
+          hasEverHadCommunitiesRef.current = false;
+          setShouldShowEmptyState(false);
+        }
+        
+        // Reload communities (will be skipped if refs still block it, but we just reset them)
+        loadCommunities();
+      }
+    }, [isAuthenticated, loadCommunities])
+  );
+
+  if (!isAuthenticated) {
+    return null;
+  }
+
+  return (
+    <View style={styles.container}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+      >
+        {/* All Communities Option */}
+        <Pressable
+          style={[styles.chip, !selectedCommunity && !showAllPublicPosts && styles.selectedChip]}
+          onPress={() => {
+            if (onShowAllPublicPostsChange) {
+              onShowAllPublicPostsChange(false);
+            }
+            onCommunityChange(null);
+          }}
+        >
+          <Ionicons
+            name="apps-outline"
+            size={16}
+            color={!selectedCommunity && !showAllPublicPosts ? COLORS.white : COLORS.textMuted}
+            style={styles.chipIcon}
+          />
+          <Text style={[styles.chipText, !selectedCommunity && !showAllPublicPosts && styles.selectedChipText]}>
+            All
+          </Text>
+        </Pressable>
+
+        {/* All Public Posts Option */}
+        <Pressable
+          style={[styles.chip, showAllPublicPosts && styles.selectedChip]}
+          onPress={() => {
+            if (onShowAllPublicPostsChange) {
+              onShowAllPublicPostsChange(true);
+            }
+            onCommunityChange(null);
+          }}
+        >
+          <Ionicons
+            name="globe-outline"
+            size={16}
+            color={showAllPublicPosts ? COLORS.white : COLORS.textMuted}
+            style={styles.chipIcon}
+          />
+          <Text style={[styles.chipText, showAllPublicPosts && styles.selectedChipText]}>
+            Public
+          </Text>
+        </Pressable>
+
+        {/* Loading State for Communities - Only show on initial load, never after empty state is determined */}
+        {isLoading && !emptyStateDeterminedRef.current && (
+          <View style={styles.loadingChip}>
+            <LoadingSpinner size="sm" />
+          </View>
+        )}
+
+        {/* Community Chips */}
+        {(!isLoading || emptyStateDeterminedRef.current) && communities.map((community) => {
+          const isSelected = selectedCommunity === community._id;
+          return (
+            <Pressable
+              key={community._id}
+              style={[styles.chip, isSelected && styles.selectedChip]}
+              onPress={() => {
+                if (onShowAllPublicPostsChange) {
+                  onShowAllPublicPostsChange(false);
+                }
+                onCommunityChange(community._id);
+              }}
+            >
+              <Ionicons
+                name="people"
+                size={16}
+                color={isSelected ? COLORS.white : COLORS.primary}
+                style={styles.chipIcon}
+              />
+              <Text style={[styles.chipText, isSelected && styles.selectedChipText]}>
+                {community.name}
+              </Text>
+            </Pressable>
+          );
+        })}
+
+        {/* Empty State - Only show when explicitly set, stable and never reloads */}
+        {shouldShowEmptyState && emptyStateDeterminedRef.current && communities.length === 0 && (
+          <View style={styles.emptyContainer} key="empty-state">
+            <Text style={styles.emptyText}>No communities yet</Text>
+          </View>
+        )}
+
+        {/* Spacer at end to prevent last chip from being visually cut off */}
+        <View style={styles.endSpacer} />
+      </ScrollView>
+    </View>
+  );
+}, (prevProps, nextProps) => {
+  // Only re-render if these specific props change (ignore function references as they're usually stable)
+  // This prevents unnecessary re-renders that could trigger useEffect
+  const propsEqual = (
+    prevProps.selectedCommunity === nextProps.selectedCommunity &&
+    prevProps.isAuthenticated === nextProps.isAuthenticated &&
+    prevProps.showAllPublicPosts === nextProps.showAllPublicPosts
+  );
+  
+  // If props are equal, don't re-render (return true means "skip render")
+  return propsEqual;
+});
+
+const styles = StyleSheet.create({
+  container: {
+    paddingVertical: SPACING.sm,
+  },
+  scrollContent: {
+    paddingLeft: SPACING.md,
+    paddingRight: SPACING.xxl,
+    gap: SPACING.sm,
+  },
+  loadingContainer: {
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    alignItems: 'center',
+  },
+  loadingChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs + 2,
+    paddingHorizontal: SPACING.md,
+    marginRight: SPACING.xs,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.xs + 2,
+    paddingHorizontal: SPACING.md,
+    borderRadius: BORDER_RADIUS.full,
+    backgroundColor: COLORS.glass.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+  },
+  selectedChip: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  chipIcon: {
+    marginRight: SPACING.xs,
+  },
+  chipText: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+  },
+  selectedChipText: {
+    color: COLORS.white,
+    fontWeight: '600',
+  },
+  emptyContainer: {
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+  },
+  emptyText: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+  },
+  endSpacer: {
+    width: SPACING.xxl,
+  },
+});
+
+export default CommunityFilter;
+
+

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+*.log
+uploads/
+
+# Compiled JavaScript files in src (should only contain TypeScript)
+backend/src/**/*.js
+!backend/src/**/*.test.js

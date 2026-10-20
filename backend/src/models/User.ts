@@ -1,0 +1,449 @@
+import mongoose, { Document, Schema, Types } from 'mongoose';
+import bcrypt from 'bcryptjs';
+import { generateRandomPixelCharacter } from '../utils/pixelCharacter';
+import { getRandomAvatarBackgroundColor } from '../utils/avatarColors';
+
+export interface PushToken {
+  token: string;
+  deviceId: string;
+  platform: 'ios' | 'android' | 'web';
+  createdAt: Date;
+}
+
+export interface IUser extends Document {
+  email: string;
+  password: string;
+  username: string;
+  displayName?: string;
+  avatar?: string;
+  avatarCharacter?: string; // Emoji character for avatar when no photo is set
+  avatarBackgroundColor?: string; // Background color for avatar character
+  nameColor?: string; // Color for the user's display name (Yellow, Blue, Pink, Green, Red, Purple)
+  pixelCharacter?: {
+    gender?: string;
+    skinColor: string;
+    hairStyle: string;
+    hairColor: string;
+    eyeColor: string;
+    shirtStyle?: string;
+    shirtColor: string;
+    pantsStyle?: string;
+    pantsColor: string;
+    shoeStyle?: string;
+    shoeColor: string;
+    name?: string;
+  };
+  bio?: string;
+  lastUsernameChange?: Date; // Track when username was last changed
+  isAnonymous: boolean;
+  showEmail: boolean;
+  phoneNumber?: string; // Phone number in E.164 format (e.g., +31612345678)
+  facebookId?: string;
+  googleId?: string;
+  isProtected?: boolean; // Protected accounts cannot be deleted (e.g., Apple review account)
+  following: Types.ObjectId[];
+  savedPosts: Types.ObjectId[];
+  blockedUsers: Types.ObjectId[]; // Users that this user has blocked
+  pushTokens: PushToken[];
+  reports: Array<{
+    user: Types.ObjectId;
+    reason: string;
+    createdAt: Date;
+  }>;
+  isTherapist?: boolean;
+  // Email verification & password reset
+  emailVerified?: boolean;
+  emailVerificationToken?: string | null;
+  emailVerificationExpires?: Date | null;
+  passwordResetToken?: string | null;
+  passwordResetExpires?: Date | null;
+  healthInfo?: {
+    mentalHealth?: Array<{
+      condition: string;
+      type?: string;
+      severity?: 'mild' | 'moderate' | 'severe';
+      notes?: string;
+    }>;
+    physicalHealth?: Array<{
+      condition: string;
+      type?: string;
+      severity?: 'mild' | 'moderate' | 'severe';
+      notes?: string;
+    }>;
+    medications?: string[];
+    therapies?: string[];
+    lifeContext?: string;
+    dateOfBirth?: string;
+    gender?: string;
+    country?: string;
+    lifestyle?: {
+      smoking?: string;
+      alcohol?: string;
+      drugs?: string;
+      physicalActivity?: string;
+      diet?: string;
+      sleep?: string;
+    };
+  };
+  lastActiveAt?: Date;
+  lastInactivityNotificationAt?: Date;
+  createdAt: Date;
+  updatedAt: Date;
+  comparePassword(candidatePassword: string): Promise<boolean>;
+}
+
+const UserSchema = new Schema<IUser>(
+  {
+    email: {
+      type: String,
+      required: [true, 'Email is required'],
+      unique: true,
+      lowercase: true,
+      trim: true,
+      match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email'],
+    },
+    password: {
+      type: String,
+      required: false, // Made optional - will be validated in pre-save hook
+      minlength: [6, 'Password must be at least 6 characters'],
+      select: false,
+    },
+    username: {
+      type: String,
+      required: [true, 'Username is required'],
+      unique: true,
+      trim: true,
+      minlength: [3, 'Username must be at least 3 characters'],
+      maxlength: [30, 'Username cannot exceed 30 characters'],
+      match: [/^[a-zA-Z0-9_]+$/, 'Username can only contain letters, numbers, and underscores'],
+    },
+    displayName: {
+      type: String,
+      trim: true,
+      maxlength: [50, 'Display name cannot exceed 50 characters'],
+    },
+    avatar: {
+      type: String,
+      default: null,
+    },
+    avatarCharacter: {
+      type: String,
+      default: null,
+    },
+    avatarBackgroundColor: {
+      type: String,
+      default: null,
+    },
+    nameColor: {
+      type: String,
+      default: null,
+      enum: ['Yellow', 'Blue', 'Pink', 'Green', 'Red', 'Purple'],
+    },
+    pixelCharacter: {
+      type: {
+        gender: String,
+        skinColor: String,
+        hairStyle: String,
+        hairColor: String,
+        eyeColor: String,
+        shirtStyle: String,
+        shirtColor: String,
+        pantsStyle: String,
+        pantsColor: String,
+        shoeStyle: String,
+        shoeColor: String,
+        name: String,
+      },
+      default: null,
+    },
+    bio: {
+      type: String,
+      maxlength: [500, 'Bio cannot exceed 500 characters'],
+      default: '',
+    },
+    lastUsernameChange: {
+      type: Date,
+      default: null,
+    },
+    isAnonymous: {
+      type: Boolean,
+      default: true,
+    },
+    showEmail: {
+      type: Boolean,
+      default: false,
+    },
+    phoneNumber: {
+      type: String,
+      trim: true,
+      default: null,
+      match: [/^\+[1-9]\d{1,14}$/, 'Phone number must be in E.164 format (e.g., +31612345678)'],
+    },
+    isProtected: {
+      type: Boolean,
+      default: false,
+    },
+    facebookId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
+    googleId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
+    following: [{
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    }],
+    savedPosts: [{
+      type: Schema.Types.ObjectId,
+      ref: 'Post',
+    }],
+    blockedUsers: [{
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    }],
+    pushTokens: [{
+      token: {
+        type: String,
+        required: true,
+      },
+      deviceId: {
+        type: String,
+        required: true,
+      },
+      platform: {
+        type: String,
+        enum: ['ios', 'android', 'web'],
+      },
+      createdAt: {
+        type: Date,
+        default: Date.now,
+      },
+    }],
+    reports: [{
+      user: {
+        type: Schema.Types.ObjectId,
+        ref: 'User',
+        required: true,
+      },
+      reason: {
+        type: String,
+        required: true,
+        enum: ['spam', 'harassment', 'inappropriate', 'impersonation', 'other'],
+      },
+      createdAt: {
+        type: Date,
+        default: Date.now,
+      },
+    }],
+    emailVerified: {
+      type: Boolean,
+      default: false,
+    },
+    emailVerificationToken: {
+      type: String,
+      default: null,
+    },
+    emailVerificationExpires: {
+      type: Date,
+      default: null,
+    },
+    passwordResetToken: {
+      type: String,
+      default: null,
+    },
+    passwordResetExpires: {
+      type: Date,
+      default: null,
+    },
+    healthInfo: {
+      dateOfBirth: {
+        type: String,
+        trim: true,
+      },
+      gender: {
+        type: String,
+        trim: true,
+      },
+      country: {
+        type: String,
+        trim: true,
+      },
+      mentalHealth: [{
+        condition: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        type: {
+          type: String,
+          trim: true,
+        },
+        severity: {
+          type: String,
+          enum: ['mild', 'moderate', 'severe'],
+          default: 'moderate',
+        },
+        notes: {
+          type: String,
+          trim: true,
+          maxlength: [1000, 'Notes cannot exceed 1000 characters'],
+        },
+      }],
+      physicalHealth: [{
+        condition: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        type: {
+          type: String,
+          trim: true,
+        },
+        severity: {
+          type: String,
+          enum: ['mild', 'moderate', 'severe'],
+          default: 'moderate',
+        },
+        notes: {
+          type: String,
+          trim: true,
+          maxlength: [1000, 'Notes cannot exceed 1000 characters'],
+        },
+      }],
+      medications: [{
+        type: String,
+        trim: true,
+      }],
+      therapies: [{
+        type: String,
+        trim: true,
+      }],
+      lifeContext: {
+        type: String,
+        trim: true,
+        maxlength: [5000, 'Life context cannot exceed 5000 characters'],
+      },
+      lifestyle: {
+        smoking: {
+          type: String,
+          trim: true,
+        },
+        alcohol: {
+          type: String,
+          trim: true,
+        },
+        drugs: {
+          type: String,
+          trim: true,
+        },
+        physicalActivity: {
+          type: String,
+          trim: true,
+        },
+        diet: {
+          type: String,
+          trim: true,
+        },
+        sleep: {
+          type: String,
+          trim: true,
+        },
+      },
+    },
+    isTherapist: {
+      type: Boolean,
+      default: false,
+    },
+    lastActiveAt: {
+      type: Date,
+      default: null,
+    },
+    lastInactivityNotificationAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
+
+// Validate password before saving (required unless Facebook user)
+// Only validate on new documents or when password is being modified
+UserSchema.pre('validate', async function (next) {
+  // Skip validation if this is an update and password is not being modified
+  if (!this.isNew) {
+    // For updates, only validate if password is explicitly being modified
+    if (!this.isModified('password')) {
+      return next();
+    }
+    // Password is being modified - validate it
+    if (this.password && this.password.length < 6) {
+      this.invalidate('password', 'Password must be at least 6 characters');
+      return next();
+    }
+    // If password is being removed (set to null/undefined) during update,
+    // check if user has facebookId/googleId or existing password in DB
+    if (!this.password) {
+      try {
+        // Check if user has a social identity or if password exists in DB
+        const UserModel = mongoose.model<IUser>('User');
+        const existingUser = await UserModel.findById(this._id).select('password facebookId googleId');
+        if (existingUser && !existingUser.facebookId && !existingUser.googleId && !existingUser.password) {
+          // User doesn't have a social identity and no password in DB - require password
+          this.invalidate('password', 'Password is required for non-social users');
+          return next();
+        }
+      } catch (error: any) {
+        // If we can't check, allow the update to proceed
+        // The user might already have a password in the database
+      }
+    }
+    return next();
+  }
+
+  // For new documents, require password unless authenticating via a social provider
+  if (this.isNew && !this.facebookId && !this.googleId && !this.password) {
+    this.invalidate('password', 'Password is required for non-social users');
+  }
+
+  next();
+});
+
+// Hash password before saving (skip if password is not modified or user is from a social provider)
+UserSchema.pre('save', async function (next) {
+  if (!this.isModified('password') || this.facebookId || this.googleId || !this.password) {
+    return next();
+  }
+  
+  const salt = await bcrypt.genSalt(10);
+  this.password = await bcrypt.hash(this.password, salt);
+  next();
+});
+
+// Ensure every user has a pixel character (new docs and edits where missing).
+UserSchema.pre('save', function (next) {
+  if (!this.pixelCharacter) {
+    this.pixelCharacter = generateRandomPixelCharacter(this.username);
+  } else if (!this.pixelCharacter.name) {
+    this.pixelCharacter.name = this.username;
+  }
+  if (!this.avatarBackgroundColor) {
+    this.avatarBackgroundColor = getRandomAvatarBackgroundColor();
+  }
+  next();
+});
+
+// Compare password method
+UserSchema.methods.comparePassword = async function (candidatePassword: string): Promise<boolean> {
+  return bcrypt.compare(candidatePassword, this.password);
+};
+
+export default mongoose.model<IUser>('User', UserSchema);
+

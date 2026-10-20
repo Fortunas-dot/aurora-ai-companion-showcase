@@ -1,0 +1,1893 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  FlatList,
+  KeyboardAvoidingView,
+  Platform,
+  RefreshControl,
+  Image,
+  Pressable,
+  Alert,
+  Dimensions,
+  ScrollView,
+  Animated,
+  Easing,
+  Keyboard,
+  TouchableWithoutFeedback,
+  Modal,
+  AppState,
+} from 'react-native';
+import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as ImagePicker from 'expo-image-picker';
+import { formatDistanceToNow, format } from 'date-fns';
+import { enUS } from 'date-fns/locale';
+import { GlassCard, GlassInput, GlassButton, Avatar, LoadingSpinner } from '../../src/components/common';
+import { EmojiPicker } from '../../src/components/chat/EmojiPicker';
+import { VoiceRecorder } from '../../src/components/chat/VoiceRecorder';
+import { VoiceMessagePlayer } from '../../src/components/chat/VoiceMessagePlayer';
+import { TypingIndicator } from '../../src/components/chat/TypingIndicator';
+import { COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from '../../src/constants/theme';
+import { messageService, Message } from '../../src/services/message.service';
+import { uploadService } from '../../src/services/upload.service';
+import { useAuthStore } from '../../src/store/authStore';
+import { chatWebSocketService } from '../../src/services/chatWebSocket.service';
+import { userService, UserProfile } from '../../src/services/user.service';
+import { getUsernameColor } from '../../src/utils/usernameColors';
+
+// Animated star component for background
+const AnimatedStar = ({ index }: { index: number }) => {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
+  const opacity = useRef(new Animated.Value(0.3 + Math.random() * 0.4)).current;
+  const scale = useRef(new Animated.Value(1)).current;
+
+  const initialXValue = Math.random() * 100;
+  const initialYValue = Math.random() * 100;
+  const directionValue = Math.random() * Math.PI * 2;
+  const distanceValue = 30 + Math.random() * 50;
+
+  const initialX = initialXValue;
+  const initialY = initialYValue;
+  const speed = 20 + Math.random() * 30;
+  const direction = directionValue;
+  const distance = distanceValue;
+
+  useEffect(() => {
+    const duration = 3000 + Math.random() * 4000;
+
+    const animate = () => {
+      Animated.loop(
+        Animated.parallel([
+          Animated.sequence([
+            Animated.timing(translateX, {
+              toValue: Math.cos(direction) * distance,
+              duration: duration,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(translateX, {
+              toValue: 0,
+              duration: duration,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(translateY, {
+              toValue: Math.sin(direction) * distance,
+              duration: duration * 1.1,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(translateY, {
+              toValue: 0,
+              duration: duration * 1.1,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(opacity, {
+              toValue: 0.1,
+              duration: duration * 0.8,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(opacity, {
+              toValue: 0.3 + Math.random() * 0.4,
+              duration: duration * 0.8,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(scale, {
+              toValue: 0.5,
+              duration: duration * 0.6,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(scale, {
+              toValue: 1,
+              duration: duration * 0.6,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+        ])
+      ).start();
+    };
+
+    animate();
+  }, []);
+
+  return (
+    <Animated.View
+      style={[
+        styles.star,
+        {
+          left: `${initialX}%`,
+          top: `${initialY}%`,
+          opacity,
+          transform: [
+            { translateX },
+            { translateY },
+            { scale },
+          ],
+        },
+      ]}
+    />
+  );
+};
+
+export default function ConversationScreen() {
+  const router = useRouter();
+  const { userId } = useLocalSearchParams<{ userId: string }>();
+  const insets = useSafeAreaInsets();
+  const { user: currentUser, isAuthenticated } = useAuthStore();
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [messageText, setMessageText] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [otherUser, setOtherUser] = useState<Message['sender'] | UserProfile | null>(null);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [isTyping, setIsTyping] = useState(false);
+  const [isOnline, setIsOnline] = useState(false);
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [emojiPickerVisible, setEmojiPickerVisible] = useState(false);
+  const [isImageViewerVisible, setIsImageViewerVisible] = useState(false);
+  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<Message[]>([]);
+  const [isMenuVisible, setIsMenuVisible] = useState(false);
+  const flatListRef = useRef<FlatList>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Helper function to normalize URLs to absolute URLs (available throughout component)
+  const normalizeUrl = useCallback((url: string | undefined | null): string | undefined => {
+    if (!url || typeof url !== 'string' || url.trim() === '') return undefined;
+    const trimmedUrl = url.trim();
+    if (trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://')) {
+      return trimmedUrl;
+    }
+    const baseUrl = 'https://aurora-production.up.railway.app';
+    const relativeUrl = trimmedUrl.startsWith('/') ? trimmedUrl : `/${trimmedUrl}`;
+    return `${baseUrl}${relativeUrl}`.replace(/([^:]\/)\/+/g, '$1');
+  }, []);
+
+  // Helper function to normalize message attachments (available throughout component)
+  const normalizeMessageAttachments = useCallback((message: any): any => {
+    if (!message) return message;
+    const normalized = { ...message };
+    if (message.attachments && Array.isArray(message.attachments)) {
+      normalized.attachments = message.attachments.map((attachment: any) => ({
+        ...attachment,
+        url: normalizeUrl(attachment.url) || attachment.url,
+      }));
+    }
+    // Also normalize sender/receiver avatars
+    if (message.sender) {
+      normalized.sender = {
+        ...message.sender,
+        avatar: normalizeUrl(message.sender.avatar),
+      };
+    }
+    if (message.receiver) {
+      normalized.receiver = {
+        ...message.receiver,
+        avatar: normalizeUrl(message.receiver.avatar),
+      };
+    }
+    return normalized;
+  }, [normalizeUrl]);
+
+  const loadOtherUser = useCallback(async () => {
+    if (!userId || !isAuthenticated) return;
+
+    try {
+      const response = await userService.getUserProfile(userId);
+      if (response.success && response.data) {
+        // Convert UserProfile to Message sender format
+        setOtherUser({
+          _id: response.data._id,
+          username: response.data.username,
+          displayName: response.data.displayName,
+          avatar: response.data.avatar,
+          pixelCharacter: response.data.pixelCharacter as any,
+          avatarCharacter: response.data.avatarCharacter,
+          avatarBackgroundColor: response.data.avatarBackgroundColor,
+        } as Message['sender']);
+      }
+    } catch (error) {
+      console.error('Error loading other user:', error);
+    }
+  }, [userId, isAuthenticated]);
+
+  const loadMessages = useCallback(async (pageNum: number = 1, append: boolean = false) => {
+    if (!userId || !isAuthenticated) return;
+
+    setIsLoading(true);
+    try {
+      const response = await messageService.getConversation(userId, pageNum, 50);
+      
+      if (response.success && response.data) {
+        // Normalize all messages using the helper function
+        const messagesWithAttachments = response.data.map((msg: Message) => normalizeMessageAttachments(msg));
+        
+        const messagesWithNonEmptyAttachments = messagesWithAttachments.filter(m => m.attachments && m.attachments.length > 0);
+        if (append) {
+          setMessages((prev) => [...messagesWithAttachments, ...prev]);
+        } else {
+          setMessages(messagesWithAttachments);
+          // Set other user from first message if available, otherwise keep existing
+          if (messagesWithAttachments.length > 0 && !otherUser) {
+            const firstMessage = messagesWithAttachments[0];
+            setOtherUser(
+              firstMessage.sender._id === currentUser?._id
+                ? firstMessage.receiver
+                : firstMessage.sender
+            );
+          }
+        }
+        
+        if (response.pagination) {
+          setHasMore(pageNum < response.pagination.pages);
+        }
+
+        // Scroll to bottom on initial load
+        if (!append && response.data.length > 0) {
+          setTimeout(() => {
+            flatListRef.current?.scrollToEnd({ animated: false });
+          }, 100);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading messages:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [userId, isAuthenticated, currentUser, otherUser]);
+
+  useEffect(() => {
+    loadOtherUser();
+  }, [loadOtherUser]);
+
+  useEffect(() => {
+    loadMessages(1, false);
+  }, [loadMessages]);
+
+  // Reconnect WebSocket when screen comes into focus (user navigates back to this screen)
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthenticated || !userId) return;
+
+      // Ensure WebSocket is connected when screen gains focus
+      const connectAndCheckOnline = async () => {
+        await chatWebSocketService.ensureConnected();
+        chatWebSocketService.checkOnline(userId);
+      };
+      connectAndCheckOnline();
+    }, [isAuthenticated, userId])
+  );
+
+  // Setup WebSocket event listeners for real-time chat
+  useEffect(() => {
+    if (!isAuthenticated || !userId) return;
+
+    // Ensure WebSocket is connected, then check online status
+    const connectAndCheckOnline = async () => {
+      await chatWebSocketService.ensureConnected();
+      chatWebSocketService.checkOnline(userId);
+    };
+    connectAndCheckOnline();
+
+    // Also check online status when the WebSocket reconnects
+    const unsubConnected = chatWebSocketService.on('connected', () => {
+      chatWebSocketService.checkOnline(userId);
+    });
+
+    // Reconnect when app comes back to foreground
+    const handleAppStateChange = (nextAppState: string) => {
+      if (nextAppState === 'active') {
+        // App came to foreground - ensure WebSocket is connected
+        connectAndCheckOnline();
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+
+    // Subscribe to events using the new listener API
+    const unsubNewMessage = chatWebSocketService.on('new_message', (message: any) => {
+      // Only handle messages from the current conversation
+      if (message.sender._id === userId || message.receiver._id === userId) {
+        setMessages((prev) => {
+          if (prev.some((m) => m._id === message._id)) return prev;
+          // Normalize attachments URLs before adding to state
+          const normalizedMessage = normalizeMessageAttachments({
+            ...message,
+            attachments: message.attachments || [],
+          });
+          return [...prev, normalizedMessage];
+        });
+
+        // Scroll to bottom
+        setTimeout(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        }, 100);
+
+        // Mark as read if it's a received message
+        if (message.sender._id === userId) {
+          chatWebSocketService.markAsRead(message._id);
+        }
+
+        // Clear typing indicator when message arrives
+        setIsTyping(false);
+      }
+    });
+
+    const unsubMessageSent = chatWebSocketService.on('message_sent', (message: any) => {
+      setMessages((prev) => {
+        // Only handle messages that belong to this conversation
+        if (message.sender._id !== userId && message.receiver._id !== userId) {
+          return prev;
+        }
+
+        let replacedTemp = false;
+
+        // First try to replace an optimistic temp message for this outgoing message
+        const updated = prev.map((m) => {
+          const isTemp =
+            typeof m._id === 'string' &&
+            m._id.startsWith('temp-') &&
+            m.sender._id === message.sender._id &&
+            m.content === message.content;
+
+          if (isTemp) {
+            replacedTemp = true;
+            const merged = {
+              ...m,
+              ...message,
+              attachments: message.attachments || m.attachments || [],
+            };
+            return normalizeMessageAttachments(merged);
+          }
+
+          if (m._id === message._id) {
+            const updatedMessage = { ...m, ...message, attachments: message.attachments || m.attachments || [] };
+            return normalizeMessageAttachments(updatedMessage);
+          }
+
+          return m;
+        });
+
+        if (replacedTemp) {
+          return updated;
+        }
+
+        if (updated.some((m) => m._id === message._id)) {
+          return updated;
+        }
+
+        // Check for duplicate by content within a short window
+        const now = new Date().getTime();
+        const messageTime = new Date(message.createdAt).getTime();
+        const isDuplicate = updated.some((m) => {
+          const mTime = new Date(m.createdAt).getTime();
+          return (
+            m.sender._id === message.sender._id &&
+            m.content === message.content &&
+            Math.abs(now - mTime) < 5000 &&
+            Math.abs(messageTime - mTime) < 5000
+          );
+        });
+
+        if (isDuplicate) return updated;
+
+        // Normalize attachments URLs before adding to state
+        const normalizedMessage = normalizeMessageAttachments({
+          ...message,
+          attachments: message.attachments || [],
+        });
+        return [...updated, normalizedMessage];
+      });
+
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+    });
+
+    // Handle WebSocket errors (e.g., validation failures)
+    // Note: Connection errors are handled silently - reconnect will happen automatically
+    const unsubError = chatWebSocketService.on('error', (error: Error) => {
+      // Only show alerts for actual message sending errors, not connection errors
+      // Connection errors are handled by automatic reconnection
+      const isConnectionError = error.message.includes('WebSocket connection') || 
+                                error.message.includes('connection error');
+      
+      if (!isConnectionError) {
+        // Only log in development mode - these errors are expected during network issues
+        if (__DEV__) {
+          console.warn('Chat WebSocket error:', error.message);
+        }
+        // Only show alert for non-connection errors (e.g., validation failures)
+        Alert.alert('Error', error.message || 'Could not send message');
+        setIsSending(false);
+        setIsUploading(false);
+      } else {
+        // For connection errors, just try to reconnect silently
+        if (__DEV__) {
+          console.log('WebSocket connection error - will attempt to reconnect');
+        }
+        chatWebSocketService.ensureConnected();
+      }
+    });
+
+    const unsubTypingStart = chatWebSocketService.on('typing_start', (typingUserId: string) => {
+      if (typingUserId === userId) {
+        setIsTyping(true);
+      }
+    });
+
+    const unsubTypingStop = chatWebSocketService.on('typing_stop', (typingUserId: string) => {
+      if (typingUserId === userId) {
+        setIsTyping(false);
+      }
+    });
+
+    const unsubUserStatus = chatWebSocketService.on('user_status', (statusUserId: string, online: boolean) => {
+      if (statusUserId === userId) {
+        setIsOnline(online);
+      }
+    });
+
+    const unsubMessageRead = chatWebSocketService.on('message_read', (messageId: string, readAt: Date) => {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg._id === messageId ? { ...msg, readAt: readAt.toISOString() } : msg
+        )
+      );
+    });
+
+    const unsubMessageReaction = chatWebSocketService.on('message_reaction', (reactionData: any) => {
+      // Normalize message ID for comparison (handle both string and ObjectId)
+      const incomingMessageId = reactionData?._id 
+        ? String(reactionData._id) 
+        : (reactionData?.messageId ? String(reactionData.messageId) : null);
+
+      if (!incomingMessageId) {
+        return;
+      }
+
+      // Update messages - search for matching message ID
+      setMessages((prev) => {
+        const normalizedIncomingId = String(incomingMessageId);
+        const updated = prev.map((msg) => {
+          // Normalize both IDs to strings for comparison
+          const currentMessageId = String(msg._id || '');
+          
+          if (currentMessageId === normalizedIncomingId) {
+            const newReactions = Array.isArray(reactionData.reactions) 
+              ? reactionData.reactions 
+              : (msg.reactions || []);
+            
+            const updatedMessage = {
+              ...msg,
+              reactions: newReactions,
+              updatedAt: reactionData.updatedAt || msg.updatedAt,
+            };
+            
+            return normalizeMessageAttachments(updatedMessage);
+          }
+          return msg;
+        });
+        
+        return updated;
+      });
+    });
+
+    // Cleanup: only remove listeners, do NOT disconnect the WebSocket
+    return () => {
+      subscription.remove();
+      unsubConnected();
+      unsubNewMessage();
+      unsubMessageSent();
+      unsubTypingStart();
+      unsubTypingStop();
+      unsubUserStatus();
+      unsubMessageRead();
+      unsubMessageReaction();
+      unsubError();
+    };
+  }, [isAuthenticated, userId]);
+
+  const handleRefresh = useCallback(async () => {
+    setIsRefreshing(true);
+    setPage(1);
+    setHasMore(true);
+    await loadMessages(1, false);
+    setIsRefreshing(false);
+  }, [loadMessages]);
+
+  const handlePickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission needed', 'We need access to your photos');
+      return;
+    }
+
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        quality: 0.8,
+        allowsMultipleSelection: true,
+      });
+
+      if (!result.canceled && result.assets) {
+        const imageUris = result.assets.map((asset) => asset.uri);
+        setSelectedImages((prev) => [...prev, ...imageUris].slice(0, 5)); // Max 5 images
+      }
+    } catch (error) {
+      console.error('Error picking image:', error);
+      Alert.alert('Error', 'Could not select image');
+    }
+  };
+
+  const handleRemoveImage = (index: number) => {
+    setSelectedImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleSearch = async (query: string) => {
+    setSearchQuery(query);
+    if (!query.trim() || !userId) {
+      setIsSearching(false);
+      setSearchResults([]);
+      return;
+    }
+
+    setIsSearching(true);
+    try {
+      const response = await messageService.searchMessages(userId, query);
+      if (response.success && response.data) {
+        setSearchResults(response.data);
+      }
+    } catch (error) {
+      console.error('Error searching messages:', error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleVoiceRecordingComplete = async (uri: string, duration: number) => {
+    console.log('handleVoiceRecordingComplete called', { uri, duration });
+    setIsUploading(true);
+    setShowVoiceRecorder(false);
+
+    try {
+      console.log('Uploading audio...', uri);
+      const uploadResult = await uploadService.uploadAudio(uri);
+      console.log('Upload result:', uploadResult);
+      
+      if (uploadResult.success && uploadResult.data) {
+        const attachments = [{
+          type: 'audio' as const,
+          url: uploadResult.data.url,
+          duration,
+        }];
+
+        console.log('Sending message with audio attachment...', attachments);
+        // Send message with audio attachment
+        if (chatWebSocketService.isConnected()) {
+          chatWebSocketService.sendMessage(userId, '', attachments);
+          console.log('Message sent via WebSocket');
+        } else {
+          const response = await messageService.sendMessage(userId, '', attachments);
+          console.log('Message sent via API:', response);
+          if (response.success && response.data) {
+            setMessages((prev) => [...prev, response.data!]);
+          }
+        }
+
+        // Optimistically update conversations list so Messages screen reflects this voice message
+        if (otherUser) {
+          const now = new Date().toISOString();
+          chatWebSocketService.emitLocalConversationUpdated({
+            user: otherUser,
+            lastMessage: {
+              _id: `temp-audio-${Date.now()}`,
+              content: '',
+              attachments,
+              createdAt: now,
+              isOwn: true,
+            },
+            unreadCount: 0,
+          });
+        }
+      } else {
+        console.error('Upload failed:', uploadResult.message);
+        Alert.alert('Error', uploadResult.message || 'Could not upload audio');
+      }
+    } catch (error) {
+      console.error('Error uploading voice message:', error);
+      Alert.alert('Error', 'Could not send voice message');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if ((!messageText.trim() && selectedImages.length === 0) || !userId || isSending) return;
+
+    setIsSending(true);
+    setIsUploading(true);
+
+    let attachments: Array<{ type: 'image'; url: string }> = [];
+
+    // Upload images if any
+    if (selectedImages.length > 0) {
+      try {
+        const uploadPromises = selectedImages.map(async (uri) => {
+          const uploadResult = await uploadService.uploadImage(uri);
+          if (uploadResult.success && uploadResult.data) {
+            return {
+              type: 'image' as const,
+              url: uploadResult.data.url,
+            };
+          }
+          return null;
+        });
+
+        const uploadedAttachments = await Promise.all(uploadPromises);
+        attachments = uploadedAttachments.filter((a) => a !== null) as Array<{ type: 'image'; url: string }>;
+        
+        // Critical fix: If we had images to upload but ended up with no attachments, that's an error
+        const hadImagesToUpload = selectedImages.length > 0;
+        if (hadImagesToUpload && attachments.length === 0) {
+          Alert.alert('Error', 'Could not upload images. Please try again.');
+          setIsSending(false);
+          setIsUploading(false);
+          return;
+        }
+      } catch (error) {
+        console.error('Error uploading images:', error);
+        Alert.alert('Error', 'Could not upload images');
+        setIsSending(false);
+        setIsUploading(false);
+        return;
+      }
+    }
+
+    const messageContent = messageText.trim() || ''; // Always provide content, even if empty
+    
+    // Final validation: must have either content or attachments before sending
+    if (!messageContent && attachments.length === 0) {
+      Alert.alert('Error', 'Message must have either text or an attachment');
+      setIsSending(false);
+      setIsUploading(false);
+      return;
+    }
+    
+    // Clear input immediately for better UX
+    setMessageText('');
+    setSelectedImages([]);
+    setIsUploading(false);
+    
+    // Create an optimistic temp message so it appears immediately in the UI
+    const nowIso = new Date().toISOString();
+    const tempId = `temp-${Date.now()}`;
+    const tempMessage: Message = {
+      _id: tempId,
+      sender: currentUser!,
+      receiver: otherUser!,
+      content: messageContent,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    setMessages((prev) => [...prev, tempMessage]);
+
+    // Scroll to bottom
+    setTimeout(() => {
+      flatListRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+
+    // Send via WebSocket (preferred) or fallback to REST API
+    if (chatWebSocketService.isConnected()) {
+      try {
+        // Send via WebSocket - will trigger onMessageSent callback when successful
+        chatWebSocketService.sendMessage(userId, messageContent, attachments);
+
+        // Optimistically update the conversations list so Messages screen shows the new message immediately
+        if (otherUser) {
+          const now = new Date().toISOString();
+          chatWebSocketService.emitLocalConversationUpdated({
+            user: otherUser,
+            lastMessage: {
+              _id: `temp-${Date.now()}`,
+              content: messageContent,
+              attachments: attachments.length > 0 ? attachments : undefined,
+              createdAt: now,
+              isOwn: true,
+            },
+            unreadCount: 0,
+          });
+        }
+
+        // Reset sending state immediately - WebSocket handles async delivery
+        setIsSending(false);
+        return; // Exit early if WebSocket send succeeds
+      } catch (error) {
+        console.error('Error sending via WebSocket, falling back to REST API:', error);
+        // Fall through to REST API fallback below
+      }
+    }
+    
+    // Fallback to REST API if WebSocket not connected or if WebSocket send failed
+    try {
+      // Ensure attachments is always an array (even if empty)
+      const attachmentsToSend = Array.isArray(attachments) && attachments.length > 0 ? attachments : undefined;
+      
+      const response = await messageService.sendMessage(userId, messageContent, attachmentsToSend);
+      
+      if (response.success && response.data) {
+        // Replace temp message with real message, ensuring attachments are always preserved
+        setMessages((prev) =>
+          prev.map((msg) => {
+            if (msg._id === tempMessage._id) {
+              const newMessage = response.data!;
+              // Always use API response attachments if they exist, otherwise fall back to temp message attachments
+              const finalAttachments = (newMessage.attachments && newMessage.attachments.length > 0)
+                ? newMessage.attachments
+                : (tempMessage.attachments && tempMessage.attachments.length > 0)
+                  ? tempMessage.attachments
+                  : [];
+              return { 
+                ...newMessage, 
+                attachments: finalAttachments,
+              };
+            }
+            return msg;
+          })
+        );
+
+        // Also update conversations list so Messages screen reflects this text / media message
+        if (otherUser) {
+          chatWebSocketService.emitLocalConversationUpdated({
+            user: otherUser,
+            lastMessage: {
+              _id: response.data._id,
+              content: messageContent,
+              attachments: (response.data.attachments && response.data.attachments.length > 0)
+                ? response.data.attachments
+                : tempMessage.attachments,
+              createdAt: response.data.createdAt,
+              isOwn: true,
+            },
+            unreadCount: 0,
+          });
+        }
+      } else {
+        // Remove temp message on error and show alert
+        setMessages((prev) => prev.filter((msg) => msg._id !== tempMessage._id));
+        Alert.alert('Error', response.message || 'Could not send message');
+      }
+    } catch (error: any) {
+      console.error('Error sending message:', error);
+      // Remove temp message on error
+      setMessages((prev) => prev.filter((msg) => msg._id !== tempMessage._id));
+      Alert.alert('Error', error.message || 'Could not send message');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  // Handle typing indicator
+  const handleTextChange = (text: string) => {
+    setMessageText(text);
+    
+    if (text.trim() && userId && chatWebSocketService.isConnected()) {
+      chatWebSocketService.sendTypingStart(userId);
+    }
+    
+    // Clear typing indicator after 3 seconds of no typing
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+    }
+    
+    typingTimeoutRef.current = setTimeout(() => {
+      if (userId && chatWebSocketService.isConnected()) {
+        chatWebSocketService.sendTypingStop(userId);
+      }
+    }, 3000);
+  };
+
+  const loadMore = useCallback(() => {
+    if (!isLoading && hasMore) {
+      const nextPage = page + 1;
+      setPage(nextPage);
+      loadMessages(nextPage, true);
+    }
+  }, [isLoading, hasMore, page, loadMessages]);
+
+  const handleReactToMessage = async (messageId: string, emoji: string) => {
+    try {
+      // Make the API call - WebSocket will broadcast to other user
+      const response = await messageService.reactToMessage(messageId, emoji);
+      if (response.success && response.data) {
+        // Update with server response - this ensures both users see the same state
+        // The WebSocket event will also update the state for the other user
+        setMessages((prev) =>
+          prev.map((msg) => {
+            const msgIdStr = String(msg._id);
+            const messageIdStr = String(messageId);
+            if (msgIdStr === messageIdStr) {
+              const updated = {
+                ...msg,
+                reactions: Array.isArray(response.data!.reactions) ? response.data!.reactions : [],
+                updatedAt: response.data!.updatedAt || msg.updatedAt,
+              };
+              return normalizeMessageAttachments(updated);
+            }
+            return msg;
+          })
+        );
+      }
+    } catch (error) {
+      console.error('Error reacting to message:', error);
+    }
+  };
+
+  const handleLongPressMessage = (messageId: string) => {
+    setSelectedMessageId(messageId);
+    setEmojiPickerVisible(true);
+  };
+
+  const handleBlockUser = () => {
+    if (!otherUser) return;
+
+    Alert.alert(
+      'Block user',
+      `Are you sure you want to block ${otherUser.displayName || otherUser.username}? You will no longer receive messages from this user.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const response = await userService.blockUser(otherUser._id);
+              if (!response.success) {
+                Alert.alert('Error', response.message || 'Could not block user');
+                return;
+              }
+              Alert.alert('', 'This user has been blocked.');
+              setIsMenuVisible(false);
+              router.back();
+            } catch (error) {
+              console.error('Error blocking user:', error);
+              Alert.alert('Error', 'Could not block user. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleReportUser = () => {
+    if (!otherUser) return;
+
+    Alert.alert(
+      'Report user',
+      'Why are you reporting this user?',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => setIsMenuVisible(false),
+        },
+        {
+          text: 'Spam',
+          onPress: async () => {
+            try {
+              const response = await userService.reportUser(otherUser._id, 'spam');
+              if (!response.success) {
+                Alert.alert('Error', response.message || 'Could not submit report');
+                return;
+              }
+              setIsMenuVisible(false);
+              Alert.alert('', 'Thank you. Your report has been submitted.');
+            } catch (error) {
+              console.error('Error reporting user:', error);
+              Alert.alert('Error', 'Could not submit report. Please try again.');
+            }
+          },
+        },
+        {
+          text: 'Inappropriate',
+          onPress: async () => {
+            try {
+              const response = await userService.reportUser(otherUser._id, 'inappropriate');
+              if (!response.success) {
+                Alert.alert('Error', response.message || 'Could not submit report');
+                return;
+              }
+              setIsMenuVisible(false);
+              Alert.alert('', 'Thank you. Your report has been submitted.');
+            } catch (error) {
+              console.error('Error reporting user:', error);
+              Alert.alert('Error', 'Could not submit report. Please try again.');
+            }
+          },
+        },
+        {
+          text: 'Other',
+          onPress: async () => {
+            try {
+              const response = await userService.reportUser(otherUser._id, 'other');
+              if (!response.success) {
+                Alert.alert('Error', response.message || 'Could not submit report');
+                return;
+              }
+              setIsMenuVisible(false);
+              Alert.alert('', 'Thank you. Your report has been submitted.');
+            } catch (error) {
+              console.error('Error reporting user:', error);
+              Alert.alert('Error', 'Could not submit report. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const renderMessage = ({ item }: { item: Message }) => {
+    const isOwn = item.sender._id === currentUser?._id;
+    const formattedTime = format(new Date(item.createdAt), 'HH:mm', { locale: enUS });
+    const showDate = false; // Could add date separators if needed
+
+    // Alias for backward compatibility (use component-level normalizeUrl)
+    const imageUrl = (url: string) => normalizeUrl(url) || url;
+
+    const hasUserReacted = (reaction: { emoji: string; users: any[] }) => {
+      return reaction.users.some((user) => user._id === currentUser?._id);
+    };
+
+    return (
+      <Pressable
+        onPress={() => Keyboard.dismiss()}
+        onLongPress={!isOwn ? () => handleLongPressMessage(item._id) : undefined}
+        style={[
+          styles.messageContainer,
+          isOwn ? styles.messageContainerOwn : styles.messageContainerOther,
+        ]}
+      >
+        {!isOwn && (
+          <Avatar
+            uri={item.sender.avatar}
+            name={item.sender.displayName || item.sender.username}
+            userId={item.sender._id}
+            pixelCharacter={(item.sender as any).pixelCharacter}
+            avatarCharacter={item.sender.avatarCharacter}
+            avatarBackgroundColor={item.sender.avatarBackgroundColor}
+            size="sm"
+            style={styles.messageAvatar}
+          />
+        )}
+        <View
+          style={[
+            styles.messageBubble,
+            isOwn ? styles.messageBubbleOwn : styles.messageBubbleOther,
+          ]}
+        >
+          {/* Attachments */}
+          {item.attachments && item.attachments.length > 0 && (
+            <View style={styles.attachmentsContainer}>
+              {item.attachments.map((attachment, index) => {
+                const normalizedUrl = imageUrl(attachment.url);
+                return (
+                  <View key={index} style={styles.attachmentWrapper}>
+                    {attachment.type === 'image' && (
+                      <Pressable
+                        onPress={() => {
+                          if (!normalizedUrl) return;
+                          setSelectedImage(normalizedUrl);
+                          setIsImageViewerVisible(true);
+                        }}
+                        style={styles.messageImage}
+                      >
+                        <Image
+                          source={{ uri: normalizedUrl }}
+                          style={styles.messageImage}
+                          resizeMode="cover"
+                        />
+                      </Pressable>
+                    )}
+                    {attachment.type === 'audio' && (
+                      <VoiceMessagePlayer
+                        uri={normalizedUrl}
+                        duration={attachment.duration}
+                        isOwn={isOwn}
+                      />
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+          
+          {/* Content */}
+          {item.content && (
+            <Text style={[styles.messageText, isOwn && styles.messageTextOwn]}>
+              {item.content}
+            </Text>
+          )}
+          
+          {/* Reactions - show for all messages that have reactions */}
+          {item.reactions && item.reactions.length > 0 && (
+            <View style={styles.reactionsContainer}>
+              {item.reactions.map((reaction, index) => (
+                <Pressable
+                  key={index}
+                  style={[
+                    styles.reactionButton,
+                    hasUserReacted(reaction) && styles.reactionButtonActive,
+                  ]}
+                  onPress={() => handleReactToMessage(item._id, reaction.emoji)}
+                >
+                  <Text style={styles.reactionEmoji}>{reaction.emoji}</Text>
+                  {reaction.users.length > 0 && (
+                    <Text style={styles.reactionCount}>{reaction.users.length}</Text>
+                  )}
+                </Pressable>
+              ))}
+            </View>
+          )}
+          
+          <Text style={[styles.messageTime, isOwn && styles.messageTimeOwn]}>
+            {formattedTime}
+          </Text>
+        </View>
+      </Pressable>
+    );
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <LinearGradient colors={COLORS.backgroundGradient} style={styles.container}>
+        <View style={styles.authPrompt}>
+          <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textMuted} />
+          <Text style={styles.authPromptTitle}>Log in to chat</Text>
+          <GlassButton
+            title="Log in"
+            onPress={() => router.push('/(auth)/login')}
+            variant="primary"
+            style={styles.authButton}
+          />
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  if (isLoading && messages.length === 0) {
+    return (
+      <LinearGradient colors={COLORS.backgroundGradient} style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <LoadingSpinner size="lg" />
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  return (
+    <LinearGradient colors={COLORS.backgroundGradient} style={styles.container}>
+      {/* Star field effect */}
+      <View style={[styles.starField, { pointerEvents: 'none' }]}>
+        {Array.from({ length: 16 }).map((_, i) => (
+          <AnimatedStar key={i} index={i} />
+        ))}
+      </View>
+
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={styles.keyboardView}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        {/* Header */}
+        <View style={[styles.header, { paddingTop: insets.top + SPACING.sm }]}>
+          <Pressable
+            style={styles.backButton}
+            onPress={() => router.back()}
+          >
+            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+          </Pressable>
+          {otherUser && (
+            <Pressable
+              style={styles.headerUser}
+              onPress={() => router.push(`/user/${otherUser._id}`)}
+            >
+              <Avatar
+                uri={otherUser.avatar}
+                name={otherUser.displayName || otherUser.username}
+                userId={otherUser._id}
+                pixelCharacter={(otherUser as any).pixelCharacter}
+                avatarCharacter={otherUser.avatarCharacter}
+                avatarBackgroundColor={otherUser.avatarBackgroundColor}
+                size="sm"
+              />
+              <View style={styles.headerUserInfo}>
+                <Text style={[styles.headerUserName, { color: getUsernameColor(otherUser._id, otherUser) }]}>
+                  {otherUser.displayName || otherUser.username}
+                </Text>
+                <Text style={[
+                  styles.headerUserStatus, 
+                  isOnline && styles.headerUserStatusOnline,
+                  isTyping && styles.headerUserStatusTyping,
+                ]}>
+                  {isTyping ? 'typing...' : isOnline ? 'Online' : 'Offline'}
+                </Text>
+              </View>
+            </Pressable>
+          )}
+          {otherUser && (
+            <Pressable
+              style={styles.moreButton}
+              onPress={() => setIsMenuVisible(true)}
+            >
+              <Ionicons name="ellipsis-vertical" size={20} color={COLORS.text} />
+            </Pressable>
+          )}
+        </View>
+
+        {/* Messages */}
+        <FlatList
+          ref={flatListRef}
+          data={messages}
+          renderItem={renderMessage}
+          keyExtractor={(item) => item._id}
+          contentContainerStyle={[
+            styles.messagesContent,
+            {
+              // Extra bottom padding so last messages are always visible above the input + keyboard,
+              // especially on devices like iPhone 12 with different safe area / keyboard heights
+              paddingBottom: SPACING.xl + insets.bottom + 80,
+            },
+          ]}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          removeClippedSubviews={false}
+          maxToRenderPerBatch={15}
+          windowSize={21}
+          initialNumToRender={15}
+          updateCellsBatchingPeriod={100}
+          scrollEventThrottle={16}
+          decelerationRate="normal"
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              tintColor={COLORS.primary}
+            />
+          }
+          onEndReached={loadMore}
+          onEndReachedThreshold={0.5}
+          ListFooterComponent={
+            hasMore ? (
+              <View style={styles.loadingFooter}>
+                <LoadingSpinner size="sm" />
+              </View>
+            ) : null
+          }
+          inverted={false}
+          onScrollBeginDrag={Keyboard.dismiss}
+        />
+
+        {/* Typing Indicator */}
+        {isTyping && (
+          <View style={styles.typingIndicatorContainer}>
+            <TypingIndicator />
+          </View>
+        )}
+
+        {/* Selected Images Preview */}
+        {selectedImages.length > 0 && (
+          <View style={styles.imagePreviewContainer}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {selectedImages.map((uri, index) => (
+                <View key={index} style={styles.imagePreviewWrapper}>
+                  <Image source={{ uri }} style={styles.imagePreview} />
+                  <Pressable
+                    style={styles.removeImageButton}
+                    onPress={() => handleRemoveImage(index)}
+                  >
+                    <Ionicons name="close-circle" size={24} color={COLORS.error} />
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
+        {/* Voice Recorder */}
+        {showVoiceRecorder && (
+          <VoiceRecorder
+            onRecordingComplete={handleVoiceRecordingComplete}
+            onCancel={() => setShowVoiceRecorder(false)}
+          />
+        )}
+
+        {/* Input */}
+        {!showVoiceRecorder && (() => {
+          // Calculate number of lines in messageText
+          const lineCount = messageText.split('\n').length;
+          const maxLines = 4;
+          const baseHeight = 48; // Minimum height for single line (includes padding)
+          const lineHeight = 24; // Additional height per extra line
+          
+          // Calculate dynamic height: base height + (lines - 1) * lineHeight, max 4 lines
+          // The baseHeight already includes padding from the style
+          const calculatedHeight = Math.min(
+            baseHeight + (lineCount - 1) * lineHeight,
+            baseHeight + (maxLines - 1) * lineHeight
+          );
+          
+          // Max height for scrolling after 4 lines (48 + 3*24 = 120)
+          const maxHeight = baseHeight + (maxLines - 1) * lineHeight;
+          
+          return (
+            <View style={[styles.inputContainer, { paddingBottom: Platform.OS === 'ios' ? insets.bottom + SPACING.xs : SPACING.sm }]}>
+              <View style={styles.inputRow}>
+                <View style={[styles.inputWrapper, styles.inputWrapperMultiline]}>
+                  <View style={[styles.inputFieldContainer, styles.inputFieldContainerMultiline]}>
+                    <GlassInput
+                      value={messageText}
+                      onChangeText={handleTextChange}
+                      placeholder="Type a message..."
+                      multiline={true}
+                      returnKeyType="default"
+                      style={styles.messageInput}
+                      inputStyle={[
+                        styles.messageInputTextMultiline,
+                        {
+                          height: calculatedHeight,
+                          maxHeight: maxHeight,
+                        },
+                        // Use centered single-line style when there's no newline and text is short
+                        !messageText.includes('\n') && messageText.length <= 40 && styles.messageInputTextCentered,
+                        messageText.length > 0 && { paddingRight: 60 },
+                      ]}
+                      maxLength={2000}
+                      showCharCount={false}
+                      onFocus={() => {
+                        // When the keyboard opens, make sure we scroll to the very bottom
+                        // so the latest messages are above the keyboard on all iPhones
+                        setTimeout(() => {
+                          flatListRef.current?.scrollToEnd({ animated: true });
+                        }, 150);
+                      }}
+                    />
+                  </View>
+                </View>
+              <Pressable
+                style={styles.attachButton}
+                onPress={handlePickImage}
+                disabled={isSending || isUploading}
+              >
+                <Ionicons
+                  name="image-outline"
+                  size={22}
+                  color={isSending || isUploading ? COLORS.textMuted : COLORS.primary}
+                />
+              </Pressable>
+              <Pressable
+                style={styles.attachButton}
+                onPress={() => setShowVoiceRecorder(true)}
+                disabled={isSending || isUploading}
+              >
+                <Ionicons
+                  name="mic-outline"
+                  size={22}
+                  color={isSending || isUploading ? COLORS.textMuted : COLORS.primary}
+                />
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.sendButton,
+                  ((!messageText.trim() && selectedImages.length === 0) || isSending || isUploading) && styles.sendButtonDisabled,
+                ]}
+                onPress={handleSendMessage}
+                disabled={(!messageText.trim() && selectedImages.length === 0) || isSending || isUploading}
+              >
+                {isSending || isUploading ? (
+                  <LoadingSpinner size="sm" />
+                ) : (
+                  <Ionicons
+                    name="send"
+                    size={20}
+                    color={(messageText.trim() || selectedImages.length > 0) ? COLORS.primary : COLORS.textMuted}
+                  />
+                )}
+              </Pressable>
+            </View>
+          </View>
+          );
+        })()}
+
+        {/* Emoji Picker */}
+        <EmojiPicker
+          visible={emojiPickerVisible}
+          onClose={() => {
+            setEmojiPickerVisible(false);
+            setSelectedMessageId(null);
+          }}
+          onSelect={(emoji) => {
+            if (selectedMessageId) {
+              handleReactToMessage(selectedMessageId, emoji);
+            }
+          }}
+        />
+
+        {/* Fullscreen image viewer */}
+        {selectedImage && (
+          <Modal
+            visible={isImageViewerVisible}
+            transparent
+            animationType="fade"
+            onRequestClose={() => {
+              setIsImageViewerVisible(false);
+              setSelectedImage(null);
+            }}
+          >
+            <Pressable
+              style={styles.imageViewerOverlay}
+              onPress={() => {
+                setIsImageViewerVisible(false);
+                setSelectedImage(null);
+              }}
+            >
+              <View style={styles.imageViewerContent}>
+                <Image
+                  source={{ uri: selectedImage }}
+                  style={styles.imageViewerImage}
+                  resizeMode="contain"
+                />
+                <Pressable
+                  style={styles.imageViewerCloseButton}
+                  onPress={() => {
+                    setIsImageViewerVisible(false);
+                    setSelectedImage(null);
+                  }}
+                >
+                  <Ionicons name="close" size={28} color="#FFFFFF" />
+                </Pressable>
+              </View>
+            </Pressable>
+          </Modal>
+        )}
+      </KeyboardAvoidingView>
+
+      {/* Report / Block menu */}
+      <Modal
+        visible={isMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsMenuVisible(false)}
+      >
+        <Pressable
+          style={styles.menuOverlay}
+          onPress={() => setIsMenuVisible(false)}
+        >
+          <View style={styles.menuContent}>
+            <Text style={styles.menuTitle}>Conversation options</Text>
+
+            <Pressable
+              style={styles.menuItem}
+              onPress={handleBlockUser}
+            >
+              <Ionicons name="ban" size={20} color={COLORS.error} />
+              <Text style={[styles.menuItemText, styles.menuItemTextDestructive]}>
+                Block user
+              </Text>
+            </Pressable>
+
+            <View style={styles.menuDivider} />
+
+            <Pressable
+              style={styles.menuItem}
+              onPress={handleReportUser}
+            >
+              <Ionicons name="flag-outline" size={20} color={COLORS.error} />
+              <Text style={[styles.menuItemText, styles.menuItemTextDestructive]}>
+                Report user
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={styles.menuCancelButton}
+              onPress={() => setIsMenuVisible(false)}
+            >
+              <Text style={styles.menuCancelText}>Close</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+    </LinearGradient>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  keyboardView: {
+    flex: 1,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.glass.border,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.glass.background,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: SPACING.sm,
+  },
+  headerUser: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  headerUserInfo: {
+    marginLeft: SPACING.sm,
+  },
+  headerUserName: {
+    ...TYPOGRAPHY.bodyMedium,
+    color: COLORS.text,
+  },
+  headerUserStatus: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+  },
+  headerUserStatusOnline: {
+    color: COLORS.primary,
+  },
+  headerUserStatusTyping: {
+    color: COLORS.primary,
+    fontStyle: 'italic',
+  },
+  moreButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  messagesContent: {
+    padding: SPACING.md,
+    paddingBottom: SPACING.lg,
+  },
+  messageContainer: {
+    flexDirection: 'row',
+    marginBottom: SPACING.sm,
+    alignItems: 'flex-end',
+  },
+  messageContainerOwn: {
+    justifyContent: 'flex-end',
+  },
+  messageContainerOther: {
+    justifyContent: 'flex-start',
+  },
+  messageAvatar: {
+    marginRight: SPACING.xs,
+  },
+  messageBubble: {
+    maxWidth: '75%',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    borderRadius: BORDER_RADIUS.lg,
+  },
+  messageBubbleOwn: {
+    backgroundColor: COLORS.userBubble,
+    borderWidth: 1,
+    borderColor: COLORS.userBubbleBorder,
+  },
+  messageBubbleOther: {
+    backgroundColor: COLORS.assistantBubble,
+    borderWidth: 1,
+    borderColor: COLORS.assistantBubbleBorder,
+  },
+  messageText: {
+    ...TYPOGRAPHY.body,
+    // Use Manjari for 1-on-1 chat messages
+    fontFamily: 'Manjari-Regular',
+    color: COLORS.text,
+    marginBottom: SPACING.xs,
+  },
+  messageTextOwn: {
+    color: COLORS.text,
+  },
+  messageTime: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+    fontSize: 10,
+  },
+  messageTimeOwn: {
+    color: COLORS.textMuted,
+  },
+  inputContainer: {
+    borderTopWidth: 1,
+    borderTopColor: COLORS.glass.border,
+    backgroundColor: COLORS.background,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm,
+    minHeight: 48,
+  },
+  inputWrapper: {
+    flex: 1,
+    minHeight: 48,
+    justifyContent: 'center',
+  },
+  inputWrapperMultiline: {
+    justifyContent: 'flex-start',
+  },
+  inputFieldContainer: {
+    position: 'relative',
+    minHeight: 48,
+  },
+  inputFieldContainerMultiline: {
+    minHeight: 48,
+    maxHeight: 120, // 4 lines max: 48 + (3 * 24) = 120
+  },
+  messageInput: {
+    flex: 1,
+    minHeight: 48,
+  },
+  messageInputTextMultiline: {
+    minHeight: 48,
+    textAlignVertical: 'top',
+    ...TYPOGRAPHY.body,
+    color: COLORS.text,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.md,
+    paddingRight: SPACING.md,
+    paddingLeft: SPACING.md,
+    lineHeight: 24,
+  },
+  messageInputTextCentered: {
+    height: 48,
+    textAlignVertical: 'center',
+    ...TYPOGRAPHY.body,
+    color: COLORS.text,
+    // Slight padding to visually center placeholder text in the bubble
+    paddingTop: 2,
+    paddingBottom: 0,
+    paddingRight: SPACING.md,
+    paddingLeft: SPACING.md,
+    includeFontPadding: false,
+    lineHeight: Platform.OS === 'android' ? 22 : 22,
+  },
+  charCountContainer: {
+    position: 'absolute',
+    bottom: 6,
+    right: SPACING.md,
+    backgroundColor: 'transparent',
+  },
+  charCount: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+    fontSize: 10,
+  },
+  sendButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.glass.background,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  sendButtonDisabled: {
+    opacity: 0.5,
+  },
+  loadingFooter: {
+    padding: SPACING.md,
+    alignItems: 'center',
+  },
+  authPrompt: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: SPACING.xl,
+  },
+  authPromptTitle: {
+    ...TYPOGRAPHY.h3,
+    color: COLORS.text,
+    marginTop: SPACING.lg,
+    marginBottom: SPACING.lg,
+  },
+  authButton: {
+    minWidth: 200,
+  },
+  typingIndicatorContainer: {
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.xs,
+  },
+  attachmentsContainer: {
+    marginBottom: SPACING.xs,
+  },
+  attachmentWrapper: {
+    marginBottom: SPACING.xs,
+  },
+  messageImage: {
+    width: 200,
+    height: 200,
+    borderRadius: BORDER_RADIUS.md,
+    marginBottom: SPACING.xs,
+  },
+  imagePreviewContainer: {
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.md, // Extra padding at top to accommodate remove button
+    paddingBottom: SPACING.sm,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.glass.border,
+    backgroundColor: COLORS.background,
+  },
+  imagePreviewWrapper: {
+    position: 'relative',
+    marginRight: SPACING.sm,
+    marginTop: SPACING.xs, // Small margin to ensure button is visible
+  },
+  imagePreview: {
+    width: 80,
+    height: 80,
+    borderRadius: BORDER_RADIUS.md,
+  },
+  removeImageButton: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    backgroundColor: COLORS.background,
+    borderRadius: 12,
+    padding: 2, // Small padding to ensure icon is fully visible
+  },
+  attachButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.glass.background,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  reactionsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: SPACING.xs,
+    marginTop: SPACING.xs,
+    marginBottom: SPACING.xs,
+  },
+  reactionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: 2,
+    borderRadius: BORDER_RADIUS.md,
+    backgroundColor: COLORS.glass.background,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+  },
+  reactionButtonActive: {
+    backgroundColor: `${COLORS.primary}20`,
+    borderColor: COLORS.primary,
+  },
+  reactionEmoji: {
+    fontSize: 14,
+  },
+  reactionCount: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textSecondary,
+    fontSize: 11,
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    gap: SPACING.sm,
+  },
+  searchInput: {
+    flex: 1,
+  },
+  searchInputText: {
+    ...TYPOGRAPHY.body,
+  },
+  clearSearchButton: {
+    padding: SPACING.xs,
+  },
+  searchResultsContainer: {
+    maxHeight: 200,
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.sm,
+  },
+  searchResultsTitle: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+    marginBottom: SPACING.xs,
+  },
+  searchResultsList: {
+    maxHeight: 150,
+  },
+  searchResultItem: {
+    padding: SPACING.sm,
+    borderRadius: BORDER_RADIUS.md,
+    backgroundColor: COLORS.glass.background,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+    marginBottom: SPACING.xs,
+  },
+  searchResultText: {
+    ...TYPOGRAPHY.body,
+    color: COLORS.text,
+    marginBottom: SPACING.xs,
+  },
+  searchResultTime: {
+    ...TYPOGRAPHY.caption,
+    color: COLORS.textMuted,
+  },
+  starField: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 0,
+  },
+  star: {
+    position: 'absolute',
+    width: 2,
+    height: 2,
+    borderRadius: 1,
+    backgroundColor: COLORS.text,
+  },
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'flex-end',
+  },
+  menuContent: {
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.xl,
+    borderTopWidth: 1,
+    borderColor: COLORS.glass.border,
+  },
+  menuTitle: {
+    ...TYPOGRAPHY.bodyMedium,
+    color: COLORS.text,
+    marginBottom: SPACING.md,
+    textAlign: 'center',
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.sm,
+    gap: SPACING.sm,
+  },
+  menuItemText: {
+    ...TYPOGRAPHY.body,
+    color: COLORS.text,
+  },
+  menuItemTextDestructive: {
+    color: COLORS.error,
+    fontWeight: '500',
+  },
+  menuDivider: {
+    height: 1,
+    backgroundColor: COLORS.glass.border,
+    marginVertical: SPACING.md,
+  },
+  menuCancelButton: {
+    marginTop: SPACING.sm,
+    alignItems: 'center',
+  },
+  menuCancelText: {
+    ...TYPOGRAPHY.body,
+    color: COLORS.textMuted,
+  },
+  imageViewerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageViewerContent: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  imageViewerImage: {
+    width: '100%',
+    height: '100%',
+  },
+  imageViewerCloseButton: {
+    position: 'absolute',
+    top: SPACING.xl * 2,
+    right: SPACING.xl,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(15, 23, 42, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(148, 163, 184, 0.6)',
+  },
+});
+
+
+
+
+
+

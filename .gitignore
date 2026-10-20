@@ -1,0 +1,12 @@
+# Scratch / temp artifacts
+figuredata-temp.json
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+.expo/
+*.log
+*.db
+uploads/
+.DS_Store

@@ -1,0 +1,240 @@
+import React, { useMemo } from 'react';
+import { View, Image, Text, StyleSheet, ViewStyle } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { COLORS, BORDER_RADIUS } from '../../constants/theme';
+import { getCharacterForUser } from '../../utils/characters';
+import { getColorByValue, getDefaultGradientColors } from '../../utils/avatarColors';
+import {
+  PixelCharacterConfig,
+  normalizePixelCharacterConfig,
+} from '../../constants/pixelCharacterOptions';
+import { buildHabboImageUrl } from '../../utils/habboFigure';
+
+interface AvatarProps {
+  uri?: string | null;
+  name?: string;
+  userId?: string;
+  pixelCharacter?: Partial<PixelCharacterConfig> | null;
+  avatarCharacter?: string | null;
+  avatarBackgroundColor?: string | null;
+  size?: 'sm' | 'md' | 'lg' | 'xl';
+  style?: ViewStyle;
+  showBorder?: boolean;
+}
+
+export const Avatar: React.FC<AvatarProps> = ({
+  uri,
+  name,
+  userId,
+  pixelCharacter,
+  avatarCharacter,
+  avatarBackgroundColor,
+  size = 'md',
+  style,
+  showBorder = true,
+}) => {
+  const isLocalPreviewUri = typeof uri === 'string' && uri.startsWith('file://');
+
+  const getSize = (): number => {
+    switch (size) {
+      case 'sm': return 32;
+      case 'lg': return 56;
+      case 'xl': return 80;
+      default: return 44;
+    }
+  };
+
+  const getFontSize = (): number => {
+    switch (size) {
+      case 'sm': return 12;
+      case 'lg': return 22;
+      case 'xl': return 32;
+      default: return 16;
+    }
+  };
+
+  const sizeValue = getSize();
+  const fontSize = getFontSize();
+  const pixelTransform = useMemo(() => {
+    // Small avatars (comments/lists) need less downward offset, otherwise the face drops too low.
+    if (sizeValue <= 32) {
+      return [{ scale: 1.18 }, { translateY: 5 }];
+    }
+    if (sizeValue <= 44) {
+      return [{ scale: 1.2 }, { translateY: 8 }];
+    }
+    return [{ scale: 1.2 }, { translateY: 10 }];
+  }, [sizeValue]);
+
+  // Normalize avatar URL to ensure it's always absolute
+  // Keep local file URIs (file://) as-is for immediate preview
+  const normalizedUri = useMemo(() => {
+    if (!uri) return null;
+    // Keep local file URIs as-is (for image picker previews)
+    if (uri.startsWith('file://')) {
+      return uri;
+    }
+    // Keep absolute HTTP/HTTPS URLs as-is
+    if (uri.startsWith('http://') || uri.startsWith('https://')) {
+      return uri;
+    }
+    // If relative URL, make it absolute
+    const baseUrl = 'https://aurora-production.up.railway.app';
+    const relativeUrl = uri.startsWith('/') ? uri : `/${uri}`;
+    const normalized = `${baseUrl}${relativeUrl}`;
+
+    return normalized;
+  }, [uri]);
+
+  const pixelAvatarUri = useMemo(() => {
+    // Keep local file previews (e.g. edit-profile picker result) visible.
+    if (isLocalPreviewUri) return null;
+    // Always prefer pixel avatars for user entities, even when legacy users
+    // do not yet have an explicit pixelCharacter object stored.
+    if (!pixelCharacter && !userId) return null;
+    const config = normalizePixelCharacterConfig(pixelCharacter ?? null);
+    return buildHabboImageUrl({
+      config,
+      direction: 2,
+      headDirection: 2,
+      size: 'l',
+      action: 'std',
+      gesture: 'std',
+    });
+  }, [isLocalPreviewUri, pixelCharacter, userId]);
+
+  const effectiveImageUri = pixelAvatarUri ?? normalizedUri;
+
+  // Get character to display (prefer avatarCharacter, fallback to user-based character, then initials)
+  const getDisplayCharacter = (): string => {
+    if (avatarCharacter) {
+      return avatarCharacter;
+    }
+    if (userId) {
+      return getCharacterForUser(userId);
+    }
+    // Fallback to initials if no userId or character
+    if (!name) return '?';
+    const parts = name.split(' ');
+    if (parts.length >= 2) {
+      return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
+  };
+
+  // Get gradient colors - use custom background color if provided, otherwise use default
+  const getGradientColors = (): string[] => {
+    if (avatarBackgroundColor) {
+      const colorInfo = getColorByValue(avatarBackgroundColor);
+      if (colorInfo) {
+        return colorInfo.gradient;
+      }
+      // If color value exists but not in our palette, create a gradient from it
+      return [avatarBackgroundColor, avatarBackgroundColor];
+    }
+    // Fallback to default gradient based on name
+    return getDefaultGradientColors(name);
+  };
+
+  return (
+    <View
+      style={[
+        styles.container,
+        {
+          width: sizeValue,
+          height: sizeValue,
+          borderRadius: sizeValue / 2,
+        },
+        showBorder && styles.border,
+        style,
+      ]}
+    >
+      {effectiveImageUri ? (
+        <View
+          style={[
+            styles.imageHolder,
+            {
+              width: sizeValue - (showBorder ? 4 : 0),
+              height: sizeValue - (showBorder ? 4 : 0),
+              borderRadius: (sizeValue - (showBorder ? 4 : 0)) / 2,
+              backgroundColor: pixelAvatarUri ? (avatarBackgroundColor || 'rgba(255,255,255,0.08)') : 'transparent',
+            },
+          ]}
+        >
+          <Image
+            source={{ uri: effectiveImageUri }}
+            style={[
+              styles.image,
+              {
+                width: sizeValue - (showBorder ? 4 : 0),
+                height: sizeValue - (showBorder ? 4 : 0),
+                borderRadius: (sizeValue - (showBorder ? 4 : 0)) / 2,
+              },
+              pixelAvatarUri
+                ? {
+                    // Bias crop to upper body so profile avatar shows head + torso.
+                    transform: pixelTransform,
+                  }
+                : null,
+            ]}
+            onError={(e) => {
+              if (__DEV__) {
+                const errMsg = e?.nativeEvent?.error || 'Unknown';
+                console.warn('Avatar: failed to load image', {
+                  uri: effectiveImageUri,
+                  error: errMsg,
+                });
+              }
+            }}
+          />
+        </View>
+      ) : (
+        <LinearGradient
+          colors={getGradientColors()}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={[
+            styles.placeholder,
+            {
+              width: sizeValue - (showBorder ? 4 : 0),
+              height: sizeValue - (showBorder ? 4 : 0),
+              borderRadius: (sizeValue - (showBorder ? 4 : 0)) / 2,
+            },
+          ]}
+        >
+          <Text style={[styles.character, { fontSize: sizeValue * 0.5 }]}>
+            {getDisplayCharacter()}
+          </Text>
+        </LinearGradient>
+      )}
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  border: {
+    borderWidth: 2,
+    borderColor: COLORS.glass.border,
+  },
+  image: {
+    resizeMode: 'cover',
+  },
+  imageHolder: {
+    overflow: 'hidden',
+  },
+  placeholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  character: {
+    color: COLORS.white,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+});
+

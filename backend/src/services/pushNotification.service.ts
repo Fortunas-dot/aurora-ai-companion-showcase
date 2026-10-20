@@ -1,0 +1,212 @@
+import Expo, { ExpoPushMessage, ExpoPushTicket } from 'expo-server-sdk';
+import User from '../models/User';
+
+// Create a new Expo SDK client
+const expo = new Expo();
+
+export interface PushNotificationPayload {
+  userId: string;
+  title: string;
+  body: string;
+  data?: Record<string, any>;
+  sound?: 'default' | null;
+  badge?: number;
+}
+
+/**
+ * Send push notification to a specific user
+ */
+export const sendPushNotification = async (payload: PushNotificationPayload): Promise<void> => {
+  try {
+    const { userId, title, body, data, sound = 'default', badge } = payload;
+
+    // Get user's push tokens
+    const user = await User.findById(userId).select('pushTokens');
+    
+    if (!user || !user.pushTokens || user.pushTokens.length === 0) {
+      console.log(`No push tokens found for user ${userId}`);
+      return;
+    }
+
+    // Filter valid Expo push tokens
+    const validTokens = user.pushTokens
+      .filter(tokenData => Expo.isExpoPushToken(tokenData.token))
+      .map(tokenData => tokenData.token);
+
+    if (validTokens.length === 0) {
+      console.log(`No valid Expo push tokens for user ${userId}`);
+      return;
+    }
+
+    // Create messages for each token
+    const messages: ExpoPushMessage[] = validTokens.map(token => ({
+      to: token,
+      sound,
+      title,
+      body,
+      data: data || {},
+      badge,
+    }));
+
+    // Chunk messages (Expo recommends sending in batches)
+    const chunks = expo.chunkPushNotifications(messages);
+    const tickets: ExpoPushTicket[] = [];
+
+    // Send each chunk
+    for (const chunk of chunks) {
+      try {
+        const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        tickets.push(...ticketChunk);
+      } catch (error) {
+        console.error('Error sending push notification chunk:', error);
+      }
+    }
+
+    // Log ticket results for debugging and collect receipt ids for delivery checks
+    const receiptIds: string[] = [];
+    tickets.forEach((ticket, index) => {
+      if (ticket.status === 'error') {
+        console.error(`Push notification error for token ${validTokens[index]}:`, ticket.message);
+        
+        // Handle specific errors
+        if (ticket.details?.error === 'DeviceNotRegistered') {
+          // Token is invalid, should be removed from user's tokens
+          removeInvalidToken(userId, validTokens[index]);
+        }
+      } else if ('id' in ticket && ticket.id) {
+        receiptIds.push(ticket.id);
+      }
+    });
+
+    // Fetch Expo receipts to detect downstream APNs/FCM delivery issues.
+    // This is especially important for iOS where APNs credential issues only appear in receipts.
+    if (receiptIds.length > 0) {
+      const receiptIdChunks = expo.chunkPushNotificationReceiptIds(receiptIds);
+
+      for (const chunk of receiptIdChunks) {
+        try {
+          const receipts = await expo.getPushNotificationReceiptsAsync(chunk);
+
+          for (const receiptId of chunk) {
+            const receipt = receipts[receiptId];
+            if (!receipt || receipt.status !== 'error') {
+              continue;
+            }
+
+            const receiptError = receipt.details?.error;
+            const receiptMessage = receipt.message || 'Unknown receipt error';
+            console.error(
+              `Push receipt error for user ${userId} (receipt ${receiptId}): ${receiptMessage}`,
+              receipt.details || {}
+            );
+
+            // If APNs/FCM marks a token as unregistered, remove it to avoid future failed sends.
+            if (receiptError === 'DeviceNotRegistered') {
+              // We do not get the token directly from receipt, so find matching ticket by receipt id.
+              const ticketIndex = tickets.findIndex((ticket) => 'id' in ticket && ticket.id === receiptId);
+              if (ticketIndex >= 0) {
+                void removeInvalidToken(userId, validTokens[ticketIndex]);
+              }
+            }
+
+            // Surface iOS credential issues in logs clearly for faster troubleshooting.
+            if (receiptError === 'InvalidCredentials') {
+              console.error(
+                'Invalid APNs credentials detected. Re-upload Apple Push Key in Expo/EAS credentials for this iOS app.'
+              );
+            }
+          }
+        } catch (receiptError) {
+          console.error('Error fetching Expo push receipts:', receiptError);
+        }
+      }
+    }
+
+    console.log(`Push notification sent to user ${userId}: ${tickets.length} tickets`);
+  } catch (error) {
+    console.error('Error in sendPushNotification:', error);
+  }
+};
+
+/**
+ * Send push notification to multiple users
+ */
+export const sendPushNotificationToMany = async (
+  userIds: string[],
+  title: string,
+  body: string,
+  data?: Record<string, any>
+): Promise<void> => {
+  const promises = userIds.map(userId =>
+    sendPushNotification({ userId, title, body, data })
+  );
+  await Promise.allSettled(promises);
+};
+
+/**
+ * Remove invalid push token from user
+ */
+const removeInvalidToken = async (userId: string, token: string): Promise<void> => {
+  try {
+    await User.findByIdAndUpdate(userId, {
+      $pull: { pushTokens: { token } }
+    });
+    console.log(`Removed invalid token for user ${userId}`);
+  } catch (error) {
+    console.error('Error removing invalid token:', error);
+  }
+};
+
+/**
+ * Notification message formatters for different notification types
+ */
+export const notificationMessages = {
+  like: (username: string): { title: string; body: string } => ({
+    title: 'New Like',
+    body: `${username} liked your post`,
+  }),
+  
+  comment: (username: string): { title: string; body: string } => ({
+    title: 'New Comment',
+    body: `${username} commented on your post`,
+  }),
+  
+  message: (username: string): { title: string; body: string } => ({
+    title: 'New Message',
+    body: `${username} sent you a message`,
+  }),
+  
+  follow: (username: string): { title: string; body: string } => ({
+    title: 'New Follower',
+    body: `${username} started following you`,
+  }),
+  
+  group_invite: (username: string, groupName: string): { title: string; body: string } => ({
+    title: 'Group Invitation',
+    body: `${username} invited you to join ${groupName}`,
+  }),
+  
+  group_join: (username: string, groupName: string): { title: string; body: string } => ({
+    title: 'New Group Member',
+    body: `${username} joined ${groupName}`,
+  }),
+  
+  journal_entry: (username: string, journalName: string): { title: string; body: string } => ({
+    title: 'New Journal Entry',
+    body: `${username} shared a new entry in "${journalName}"`,
+  }),
+
+  journal_streak: (streakDays: number): { title: string; body: string } => ({
+    title: streakDays >= 7 ? 'Amazing Streak!' : 'Nice Streak!',
+    body:
+      streakDays <= 1
+        ? 'You wrote in your journal today. Keep going!'
+        : `You journaled ${streakDays} days in a row. Keep going!`,
+  }),
+};
+
+export default {
+  sendPushNotification,
+  sendPushNotificationToMany,
+  notificationMessages,
+};

@@ -1,0 +1,1413 @@
+import React, { useEffect, useRef, useMemo, useState, useCallback } from 'react';
+import { View, StyleSheet, Alert, ActivityIndicator, Text, Keyboard, Platform, Pressable, Animated, Dimensions, Easing, Modal } from 'react-native';
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { LinearGradient } from 'expo-linear-gradient';
+import { MessageList } from '../src/components/chat/MessageList';
+import { ChatInput } from '../src/components/chat/ChatInput';
+import { ContextIndicator } from '../src/components/chat/ContextIndicator';
+import { useStreamingResponse } from '../src/hooks/useStreamingResponse';
+import { useChatHistory } from '../src/hooks/useChatHistory';
+import { useChatStore } from '../src/store/chatStore';
+import { useAuthStore } from '../src/store/authStore';
+import { journalService } from '../src/services/journal.service';
+import { COLORS, SPACING, TYPOGRAPHY, BORDER_RADIUS } from '../src/constants/theme';
+import { AuroraCore as OrganicAuroraCore } from '../src/components/voice/AuroraCore.sphere.organic';
+import { useTheme } from '../src/hooks/useTheme';
+import { useConsentStore } from '../src/store/consentStore';
+import { AiConsentCard } from '../src/components/legal/AiConsentCard';
+
+const { width, height } = Dimensions.get('window');
+
+// Animated Psychology/Therapy Symbol Component - Lotus Flower (Blooming)
+const PsychologySymbol: React.FC<{ size?: number }> = ({ size = 28 }) => {
+  const { colors } = useTheme();
+  
+  // Petal animations - each petal blooms at different times
+  const petal1 = useRef(new Animated.Value(0)).current;
+  const petal2 = useRef(new Animated.Value(0)).current;
+  const petal3 = useRef(new Animated.Value(0)).current;
+  const petal4 = useRef(new Animated.Value(0)).current;
+  const petal5 = useRef(new Animated.Value(0)).current;
+  const petal6 = useRef(new Animated.Value(0)).current;
+  const petal7 = useRef(new Animated.Value(0)).current;
+  const petal8 = useRef(new Animated.Value(0)).current;
+  
+  // Center glow animation
+  const centerGlow = useRef(new Animated.Value(0.6)).current;
+  const rotate = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Blooming animation sequence - petals open one by one
+    const bloomAnimation = Animated.sequence([
+      // First layer of petals
+      Animated.parallel([
+        Animated.timing(petal1, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(petal5, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.parallel([
+        Animated.timing(petal3, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(petal7, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+      // Second layer of petals
+      Animated.parallel([
+        Animated.timing(petal2, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(petal6, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.parallel([
+        Animated.timing(petal4, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(petal8, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]),
+    ]);
+
+    // Center glow pulse
+    const glowAnimation = Animated.loop(
+      Animated.sequence([
+        Animated.timing(centerGlow, {
+          toValue: 1,
+          duration: 2000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(centerGlow, {
+          toValue: 0.6,
+          duration: 2000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+
+    // Slow rotation
+    const rotateAnimation = Animated.loop(
+      Animated.timing(rotate, {
+        toValue: 1,
+        duration: 20000,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+
+    // Start animations
+    bloomAnimation.start();
+    glowAnimation.start();
+    rotateAnimation.start();
+
+    // Loop the blooming animation
+    const bloomLoop = Animated.loop(
+      Animated.sequence([
+        bloomAnimation,
+        Animated.delay(2000),
+        Animated.parallel([
+          Animated.timing(petal1, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal2, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal3, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal4, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal5, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal6, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal7, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+          Animated.timing(petal8, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+        ]),
+        Animated.delay(1000),
+      ])
+    );
+
+    bloomLoop.start();
+
+    return () => {
+      bloomLoop.stop();
+      glowAnimation.stop();
+      rotateAnimation.stop();
+    };
+  }, []);
+
+  const rotation = rotate.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '360deg'],
+  });
+
+  // Petal positions in a lotus pattern (8 petals)
+  const petalAngles = [0, 45, 90, 135, 180, 225, 270, 315];
+  const petals = [
+    { anim: petal1, angle: 0 },
+    { anim: petal2, angle: 45 },
+    { anim: petal3, angle: 90 },
+    { anim: petal4, angle: 135 },
+    { anim: petal5, angle: 180 },
+    { anim: petal6, angle: 225 },
+    { anim: petal7, angle: 270 },
+    { anim: petal8, angle: 315 },
+  ];
+
+  return (
+    <Animated.View
+      style={{
+        width: size,
+        height: size,
+        justifyContent: 'center',
+        alignItems: 'center',
+        position: 'relative',
+        transform: [{ rotate: rotation }],
+      }}
+    >
+      {/* Lotus petals */}
+      {petals.map((petal, i) => {
+        const angle = (petal.angle * Math.PI) / 180;
+        const radius = size * 0.25;
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        
+        const scale = petal.anim.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.3, 1],
+        });
+
+        const opacity = petal.anim.interpolate({
+          inputRange: [0, 1],
+          outputRange: [0.4, 0.9],
+        });
+
+        return (
+          <Animated.View
+            key={i}
+            style={{
+              position: 'absolute',
+              left: size / 2 + x - size * 0.1,
+              top: size / 2 + y - size * 0.1,
+              width: size * 0.2,
+              height: size * 0.2,
+              borderRadius: size * 0.1,
+              backgroundColor: colors.primary,
+              opacity,
+              transform: [
+                { scale },
+                { rotate: `${petal.angle}deg` },
+              ],
+              shadowColor: colors.primary,
+              shadowOffset: { width: 0, height: 0 },
+              shadowOpacity: 0.6,
+              shadowRadius: 3,
+              elevation: 3,
+            }}
+          />
+        );
+      })}
+      
+      {/* Center of the lotus (glowing core) */}
+      <Animated.View
+        style={{
+          position: 'absolute',
+          width: size * 0.3,
+          height: size * 0.3,
+          borderRadius: size * 0.15,
+          backgroundColor: colors.primary,
+          opacity: centerGlow,
+          transform: [{ scale: centerGlow }],
+          shadowColor: colors.primary,
+          shadowOffset: { width: 0, height: 0 },
+          shadowOpacity: 1,
+          shadowRadius: 6,
+          elevation: 6,
+        }}
+      >
+        <LinearGradient
+          colors={[colors.primary, `${colors.primary}80`, 'transparent']}
+          style={{
+            width: '100%',
+            height: '100%',
+            borderRadius: size * 0.15,
+          }}
+        />
+      </Animated.View>
+    </Animated.View>
+  );
+};
+
+// Animated star component for background
+const AnimatedStar = ({ index }: { index: number }) => {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
+  const opacity = useRef(new Animated.Value(0.3 + Math.random() * 0.4)).current;
+  const scale = useRef(new Animated.Value(1)).current;
+
+  const initialX = Math.random() * 100;
+  const initialY = Math.random() * 100;
+  const speed = 20 + Math.random() * 30;
+  const direction = Math.random() * Math.PI * 2;
+  const distance = 30 + Math.random() * 50;
+
+  useEffect(() => {
+    const duration = 3000 + Math.random() * 4000;
+
+    const animate = () => {
+      Animated.loop(
+        Animated.parallel([
+          Animated.sequence([
+            Animated.timing(translateX, {
+              toValue: Math.cos(direction) * distance,
+              duration: duration,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(translateX, {
+              toValue: 0,
+              duration: duration,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(translateY, {
+              toValue: Math.sin(direction) * distance,
+              duration: duration * 1.1,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(translateY, {
+              toValue: 0,
+              duration: duration * 1.1,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(opacity, {
+              toValue: 0.1,
+              duration: duration * 0.8,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(opacity, {
+              toValue: 0.3 + Math.random() * 0.4,
+              duration: duration * 0.8,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(scale, {
+              toValue: 0.5,
+              duration: duration * 0.6,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(scale, {
+              toValue: 1,
+              duration: duration * 0.6,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+        ])
+      ).start();
+    };
+
+    animate();
+  }, []);
+
+  return (
+    <Animated.View
+      style={[
+        styles.star,
+        {
+          left: `${initialX}%`,
+          top: `${initialY}%`,
+          opacity,
+          transform: [
+            { translateX },
+            { translateY },
+            { scale },
+          ],
+        },
+      ]}
+    />
+  );
+};
+
+export default function TextChatScreen() {
+  const router = useRouter();
+  // For now we always use Claude as the AI provider. The OpenAI path remains
+  // available in the codebase and can be re-enabled later if desired.
+  const aiProvider: 'claude' | 'openai' = 'claude';
+  const insets = useSafeAreaInsets();
+  const { colors } = useTheme();
+  const { user } = useAuthStore();
+  const { sendMessage, isLoading, cancelStreaming } = useStreamingResponse(aiProvider);
+  const { clearHistory, isLoading: isLoadingHistory } = useChatHistory();
+  const { messages, isStreaming, error, setError, clearMessages, setAvailableContext, availableContext } = useChatStore();
+  const { aiConsentStatus, isLoading: isConsentLoading, loadConsent, grantAiConsent, denyAiConsent } = useConsentStore();
+  const [isFinishingSession, setIsFinishingSession] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [showSessionDoneModal, setShowSessionDoneModal] = useState(false);
+
+  // Track keyboard height manually — more reliable than KeyboardAvoidingView
+  useEffect(() => {
+    const showListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      (e) => setKeyboardHeight(e.endCoordinates.height),
+    );
+    const hideListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardHeight(0),
+    );
+    return () => {
+      showListener.remove();
+      hideListener.remove();
+    };
+  }, []);
+  
+  // Animation for Aurora logo transition
+  const auroraScale = useRef(new Animated.Value(1)).current;
+  const auroraOpacity = useRef(new Animated.Value(1)).current;
+  const starsOpacity = useRef(new Animated.Value(0)).current;
+  
+  // Floating Aurora animation when messages exist
+  const floatingAuroraX = useRef(new Animated.Value(width * 0.2)).current;
+  const floatingAuroraY = useRef(new Animated.Value(height * 0.3)).current;
+  const floatingAuroraOpacity = useRef(new Animated.Value(0.15)).current; // Low opacity for readability
+  
+  // Bioluminescent border glow effects
+  const [borderGlows, setBorderGlows] = useState<Array<{
+    id: number;
+    side: 'top' | 'bottom' | 'left' | 'right';
+    position: number;
+    opacity: Animated.Value;
+  }>>([]);
+  const glowIdRef = useRef(0);
+  
+  const hasMessages = messages.length > 0;
+  const [showMenu, setShowMenu] = useState(false);
+  
+  // Typewriter effect for initial greeting
+  const initialGreeting = "Hi, this is Aurora, how are you feeling today?";
+  const [displayedText, setDisplayedText] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  
+  // Typewriter effect when screen opens (only if no messages) - optimized
+  useEffect(() => {
+    if (!hasMessages && !isTyping) {
+      setIsTyping(true);
+      setDisplayedText('');
+      let currentIndex = 0;
+      let rafId: number;
+      
+      const typeNext = () => {
+        if (currentIndex < initialGreeting.length) {
+          setDisplayedText(initialGreeting.substring(0, currentIndex + 1));
+          currentIndex++;
+          rafId = requestAnimationFrame(() => {
+            setTimeout(typeNext, 20); // Faster typing, 20ms per character
+          });
+        } else {
+          setIsTyping(false);
+        }
+      };
+      
+      rafId = requestAnimationFrame(() => {
+        setTimeout(typeNext, 20);
+      });
+      
+      return () => {
+        if (rafId) cancelAnimationFrame(rafId);
+      };
+    } else if (hasMessages) {
+      // If messages exist, show full text immediately
+      setDisplayedText(initialGreeting);
+    }
+  }, [hasMessages]);
+  
+  // Load consent + context information on mount to show on initial screen
+  useEffect(() => {
+    // Consent is already loaded in RootLayout, but this is a safe fallback
+    loadConsent().catch(console.error);
+
+    const loadContext = async () => {
+      if (!user) return;
+      
+      try {
+        // Load journal context
+        const journalResponse = await journalService.getAuroraContext(5);
+        const journalContext = journalResponse.success && journalResponse.data ? journalResponse.data : [];
+        
+        // Check for health info
+        const hasHealthInfo = !!(user?.healthInfo && (
+          (user.healthInfo.mentalHealth && user.healthInfo.mentalHealth.length > 0) ||
+          (user.healthInfo.physicalHealth && user.healthInfo.physicalHealth.length > 0) ||
+          (user.healthInfo.medications && user.healthInfo.medications.length > 0) ||
+          (user.healthInfo.therapies && user.healthInfo.therapies.length > 0)
+        ));
+        const hasJournalEntries = journalContext.length > 0;
+        
+        // Set context info for display on initial screen
+        if (hasHealthInfo || hasJournalEntries) {
+          setAvailableContext({
+            hasHealthInfo,
+            hasJournalEntries,
+          });
+        }
+      } catch (error) {
+        console.log('Could not load context:', error);
+      }
+    };
+
+    loadContext();
+  }, [user, setAvailableContext, loadConsent]);
+  
+  // Initialize animations on mount - always start with large Aurora
+  useEffect(() => {
+    // Always start with large Aurora visible (no messages initially)
+    auroraScale.setValue(1);
+    auroraOpacity.setValue(1);
+    starsOpacity.setValue(0);
+  }, []); // Only run on mount
+
+  useEffect(() => {
+    if (error) {
+      Alert.alert('Error', error, [
+        {
+          text: 'OK',
+          onPress: () => setError(null),
+        },
+      ]);
+    }
+  }, [error, setError]);
+
+  // Animate Aurora logo and stars based on message state
+  useEffect(() => {
+    if (hasMessages) {
+      // Shrink Aurora and fade in stars
+      Animated.parallel([
+        Animated.timing(auroraScale, {
+          toValue: 0.15, // Much smaller
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(auroraOpacity, {
+          toValue: 0.6,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(starsOpacity, {
+          toValue: 1,
+          duration: 1000,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(floatingAuroraOpacity, {
+          toValue: 0.15, // Low opacity for readability
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    } else {
+      // Expand Aurora and fade out stars
+      Animated.parallel([
+        Animated.timing(auroraScale, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(auroraOpacity, {
+          toValue: 1,
+          duration: 800,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(starsOpacity, {
+          toValue: 0,
+          duration: 500,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(floatingAuroraOpacity, {
+          toValue: 0,
+          duration: 500,
+          easing: Easing.in(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [hasMessages]);
+
+  // Helper function to create border glow effect - optimized to limit concurrent glows
+  const createBorderGlow = useCallback((side: 'top' | 'bottom' | 'left' | 'right', position: number) => {
+    // Limit concurrent glows for performance - max 3 at a time
+    setBorderGlows(prev => {
+      if (prev.length >= 3) return prev; // Don't create more if we already have 3
+      
+      const id = glowIdRef.current++;
+      const opacity = new Animated.Value(0);
+      
+      // Animate glow in and out
+      Animated.sequence([
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: 200,
+          easing: Easing.out(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 0,
+          duration: 800,
+          easing: Easing.in(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        // Remove glow after animation
+        setBorderGlows(prevGlows => prevGlows.filter(g => g.id !== id));
+      });
+      
+      return [...prev, { id, side, position, opacity }];
+    });
+  }, []);
+
+  // Floating animation for tiny Aurora with boundary detection and bounce
+  useEffect(() => {
+    if (!hasMessages) {
+      floatingAuroraX.setValue(width * 0.2);
+      floatingAuroraY.setValue(height * 0.3);
+      return;
+    }
+
+    const auroraSize = 60;
+    const margin = 30; // Safe margin from edges
+    const headerHeight = insets.top + 60;
+    const inputAreaHeight = 100;
+    
+    // Boundaries
+    const minX = margin;
+    const maxX = width - margin - auroraSize;
+    const minY = headerHeight + margin;
+    const maxY = height - inputAreaHeight - margin - auroraSize;
+
+    // Random starting position within bounds
+    const startX = Math.random() * (maxX - minX) + minX;
+    const startY = Math.random() * (maxY - minY) + minY;
+    
+    floatingAuroraX.setValue(startX);
+    floatingAuroraY.setValue(startY);
+
+    let currentX = startX;
+    let currentY = startY;
+    // Initial velocity for smooth, random movement
+    let velocityX = (Math.random() - 0.5) * 1.5; // Reduced from 2.5 to 1.5
+    let velocityY = (Math.random() - 0.5) * 1.5;
+
+    let animationFrameId: number | null = null;
+
+    // Animation loop with boundary detection
+    const animate = () => {
+      const speed = 0.7; // Reduced from 1.2 to 0.7 for slower movement
+      
+      const updatePosition = () => {
+        // Update position
+        currentX += velocityX * speed;
+        currentY += velocityY * speed;
+
+        // Boundary detection and bounce
+        // Left boundary
+        if (currentX < minX) {
+          currentX = minX;
+          // More random bounce direction
+          velocityX = Math.abs((Math.random() - 0.3) * 2.5);
+          createBorderGlow('left', currentY);
+        }
+        // Right boundary
+        else if (currentX > maxX) {
+          currentX = maxX;
+          // More random bounce direction
+          velocityX = -Math.abs((Math.random() - 0.3) * 1.5);
+          createBorderGlow('right', currentY);
+        }
+
+        // Top boundary
+        if (currentY < minY) {
+          currentY = minY;
+          // More random bounce direction
+          velocityY = Math.abs((Math.random() - 0.3) * 1.5);
+          createBorderGlow('top', currentX);
+        }
+        // Bottom boundary
+        else if (currentY > maxY) {
+          currentY = maxY;
+          // More random bounce direction
+          velocityY = -Math.abs((Math.random() - 0.3) * 1.5);
+          createBorderGlow('bottom', currentX);
+        }
+
+        // Less frequent random variation for better performance
+        if (Math.random() < 0.05) { // Reduced from 0.15 to 0.05 (5% chance) for better performance
+          velocityX += (Math.random() - 0.5) * 0.3;
+          velocityY += (Math.random() - 0.5) * 0.3;
+        }
+
+        // Normalize velocity to prevent too fast movement
+        const maxVelocity = 2.5; // Reduced from 4.0 to 2.5
+        const velocityMagnitude = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
+        if (velocityMagnitude > maxVelocity) {
+          velocityX = (velocityX / velocityMagnitude) * maxVelocity;
+          velocityY = (velocityY / velocityMagnitude) * maxVelocity;
+        }
+
+        // Update animated values
+        floatingAuroraX.setValue(currentX);
+        floatingAuroraY.setValue(currentY);
+
+        // Continue animation
+        animationFrameId = requestAnimationFrame(updatePosition);
+      };
+
+      updatePosition();
+    };
+
+    // Start animation after small delay (reduced for faster start)
+    const timeoutId = setTimeout(() => {
+      animate();
+    }, 200);
+
+    return () => {
+      clearTimeout(timeoutId);
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
+    };
+  }, [hasMessages, width, height, insets.top, createBorderGlow]);
+
+  const handleSend = async (message: string) => {
+    if (aiConsentStatus !== 'granted') {
+      Alert.alert(
+        'AI Consent Required',
+        'To use AI-powered chat, please review how we use your data and provide consent.',
+      );
+      return;
+    }
+
+    try {
+      await sendMessage(message);
+    } catch (err) {
+      console.error('Failed to send message:', err);
+    }
+  };
+
+  const handleFinishSession = async () => {
+    if (isStreaming || isLoading || isFinishingSession || messages.length === 0) {
+      return;
+    }
+
+    setIsFinishingSession(true);
+    try {
+      // Transform messages to only include role and content (backend expects this format)
+      const messagesForBackend = messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+      
+      const response = await journalService.finishChatSession(messagesForBackend);
+      
+      if (response.success) {
+        setShowSessionDoneModal(true);
+      } else {
+        Alert.alert('Error', response.message || 'Could not finish session');
+      }
+    } catch (error: any) {
+      console.error('Error finishing session:', error);
+      const errorMessage = error?.response?.data?.message || error?.message || 'Something went wrong while finishing the session';
+      Alert.alert('Error', errorMessage);
+    } finally {
+      setIsFinishingSession(false);
+    }
+  };
+
+  const handleSessionDoneOK = async () => {
+    setShowSessionDoneModal(false);
+    try {
+      await clearHistory();
+      clearMessages();
+      setBorderGlows([]);
+      floatingAuroraX.setValue(width * 0.2);
+      floatingAuroraY.setValue(height * 0.3);
+      setDisplayedText('');
+      setIsTyping(false);
+      setShowMenu(false);
+      setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(auroraScale, { toValue: 1, duration: 600, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+          Animated.timing(auroraOpacity, { toValue: 1, duration: 600, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+          Animated.timing(starsOpacity, { toValue: 0, duration: 400, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+          Animated.timing(floatingAuroraOpacity, { toValue: 0, duration: 400, easing: Easing.in(Easing.ease), useNativeDriver: true }),
+        ]).start();
+      }, 50);
+    } catch (err) {
+      console.error('Failed to clear chat after session:', err);
+    }
+  };
+
+  const handleClearChat = async () => {
+    Alert.alert(
+      'Clear Chat History',
+      'Are you sure you want to clear all chat messages? This action cannot be undone.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => setShowMenu(false),
+        },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await clearHistory();
+              clearMessages();
+              
+              // Clear border glows
+              setBorderGlows([]);
+              
+              // Reset floating Aurora position immediately
+              floatingAuroraX.setValue(width * 0.2);
+              floatingAuroraY.setValue(height * 0.3);
+              
+              // Reset typewriter effect - will trigger automatically via useEffect when hasMessages becomes false
+              setDisplayedText('');
+              setIsTyping(false);
+              
+              setShowMenu(false);
+              
+              // Force immediate animation reset (useEffect will also trigger but this ensures it happens)
+              // Use setTimeout to ensure state has updated
+              setTimeout(() => {
+                Animated.parallel([
+                  Animated.timing(auroraScale, {
+                    toValue: 1,
+                    duration: 600,
+                    easing: Easing.out(Easing.ease),
+                    useNativeDriver: true,
+                  }),
+                  Animated.timing(auroraOpacity, {
+                    toValue: 1,
+                    duration: 600,
+                    easing: Easing.out(Easing.ease),
+                    useNativeDriver: true,
+                  }),
+                  Animated.timing(starsOpacity, {
+                    toValue: 0,
+                    duration: 400,
+                    easing: Easing.out(Easing.ease),
+                    useNativeDriver: true,
+                  }),
+                  Animated.timing(floatingAuroraOpacity, {
+                    toValue: 0,
+                    duration: 400,
+                    easing: Easing.in(Easing.ease),
+                    useNativeDriver: true,
+                  }),
+                ]).start();
+              }, 50);
+            } catch (err) {
+              console.error('Failed to clear chat history:', err);
+              Alert.alert('Error', 'Failed to clear chat history. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  if (isLoadingHistory) {
+    return (
+      <LinearGradient
+        colors={colors.backgroundGradient}
+        style={styles.container}
+      >
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={[styles.loadingText, { color: colors.textSecondary }]}>Loading...</Text>
+        </View>
+      </LinearGradient>
+    );
+  }
+
+  return (
+    <View style={styles.container}>
+      {/* Base gradient */}
+      <LinearGradient
+        colors={colors.backgroundGradient}
+        style={StyleSheet.absoluteFill}
+      />
+      
+      {/* Star field effect - only visible when messages exist - reduced for performance */}
+      <Animated.View 
+        style={[
+          styles.starField, 
+          { opacity: starsOpacity },
+          { pointerEvents: 'none' }
+        ]}
+      >
+        {Array.from({ length: 15 }).map((_, i) => (
+          <AnimatedStar key={i} index={i} />
+        ))}
+      </Animated.View>
+
+      {/* Large Aurora symbol in center when no messages */}
+      {!hasMessages && (
+        <>
+          {/* Speech bubble above Aurora */}
+          <Animated.View
+            style={[
+              styles.speechBubble,
+              {
+                opacity: auroraOpacity,
+                transform: [{ scale: auroraScale }],
+              },
+            ]}
+            pointerEvents="none"
+          >
+            <View style={[styles.speechBubbleContent, { backgroundColor: colors.glass.background, borderColor: colors.glass.border }]}>
+              <Text style={[styles.speechBubbleText, { color: colors.text }]}>
+                {displayedText || initialGreeting}
+                {isTyping && <Text style={{ opacity: 0.5 }}>|</Text>}
+              </Text>
+            </View>
+            <View style={[styles.speechBubbleTail, { borderTopColor: colors.glass.background }]} />
+          </Animated.View>
+          
+          {/* Context indicator - always shows what data Aurora analyzes */}
+          <Animated.View
+            style={[
+              styles.contextIndicatorContainer,
+              {
+                opacity: auroraOpacity,
+                transform: [{ scale: auroraScale }],
+              },
+            ]}
+            pointerEvents="none"
+          >
+            <ContextIndicator
+              hasHealthInfo={availableContext?.hasHealthInfo || false}
+              hasJournalEntries={availableContext?.hasJournalEntries || false}
+            />
+          </Animated.View>
+          
+          <Animated.View
+            style={[
+              styles.auroraContainer,
+              {
+                opacity: auroraOpacity,
+                transform: [{ scale: auroraScale }],
+              },
+            ]}
+            pointerEvents="none"
+          >
+            <OrganicAuroraCore state="idle" audioLevel={0} size={width * 0.7} />
+          </Animated.View>
+        </>
+      )}
+
+
+      {/* Floating tiny Aurora sphere when messages exist */}
+      {hasMessages && (
+        <Animated.View
+          style={[
+            styles.floatingAurora,
+            {
+              opacity: floatingAuroraOpacity,
+              transform: [
+                { translateX: floatingAuroraX },
+                { translateY: floatingAuroraY },
+              ],
+            },
+          ]}
+          pointerEvents="none"
+        >
+          <OrganicAuroraCore state="idle" audioLevel={0} size={60} />
+        </Animated.View>
+      )}
+
+      {/* Bioluminescent border glow effects */}
+      {hasMessages && borderGlows.map((glow) => (
+        <Animated.View
+          key={glow.id}
+          style={[
+            styles.borderGlow,
+            glow.side === 'top' && {
+              top: 0,
+              left: glow.position - 40,
+              width: 80,
+              height: 3,
+            },
+            glow.side === 'bottom' && {
+              bottom: 100, // Above input area
+              left: glow.position - 40,
+              width: 80,
+              height: 3,
+            },
+            glow.side === 'left' && {
+              left: 0,
+              top: glow.position - 40,
+              width: 3,
+              height: 80,
+            },
+            glow.side === 'right' && {
+              right: 0,
+              top: glow.position - 40,
+              width: 3,
+              height: 80,
+            },
+            { opacity: glow.opacity },
+          ]}
+          pointerEvents="none"
+        >
+          <LinearGradient
+            colors={[colors.primary, `${colors.primary}CC`, `${colors.primary}80`, 'transparent']}
+            start={
+              glow.side === 'top' ? { x: 0.5, y: 0 } :
+              glow.side === 'bottom' ? { x: 0.5, y: 1 } :
+              glow.side === 'left' ? { x: 0, y: 0.5 } :
+              { x: 1, y: 0.5 }
+            }
+            end={
+              glow.side === 'top' ? { x: 0.5, y: 1 } :
+              glow.side === 'bottom' ? { x: 0.5, y: 0 } :
+              glow.side === 'left' ? { x: 1, y: 0.5 } :
+              { x: 0, y: 0.5 }
+            }
+            style={StyleSheet.absoluteFill}
+          />
+        </Animated.View>
+      ))}
+
+      {/* Header */}
+      <View
+        style={[styles.header, { paddingTop: insets.top + SPACING.sm, borderBottomColor: colors.glass.border }]}
+      >
+        <Pressable
+          style={[styles.backButton, { backgroundColor: colors.glass.background, borderColor: colors.glass.border }]}
+          onPress={() => router.back()}
+        >
+          <Ionicons name="arrow-back" size={24} color={colors.text} />
+        </Pressable>
+        <View style={styles.headerContent}>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Aurora</Text>
+          {/* Subtitle intentionally kept neutral; we don't surface the specific model here */}
+          <Text style={[styles.headerSubtitle, { color: colors.textMuted }]}>
+            Mental health chat
+          </Text>
+        </View>
+        <View style={styles.psychologySymbolContainer}>
+          <PsychologySymbol size={28} />
+        </View>
+      </View>
+
+      <View style={[styles.chatContainer, { paddingBottom: keyboardHeight }]}>
+        {/* AI Consent banner above chat whenever consent is not granted.
+            If user denied before, we still show this every time until they allow. */}
+        {!isConsentLoading && aiConsentStatus !== 'granted' && (
+          <View style={{ paddingHorizontal: SPACING.md, paddingBottom: SPACING.sm }}>
+            <AiConsentCard
+              onAccept={grantAiConsent}
+              onDecline={denyAiConsent}
+              onLearnMore={() => router.push('/ai-data-info')}
+            />
+          </View>
+        )}
+
+
+        <MessageList />
+        {/* Toolbar with action buttons */}
+        {hasMessages && (
+          <View style={[styles.toolbar, { borderBottomColor: colors.glass.border }]}>
+            <View style={styles.toolbarSpacer} />
+            <Pressable
+              style={[styles.toolbarButton, { backgroundColor: colors.glass.background, borderColor: colors.glass.border }]}
+              onPress={handleFinishSession}
+              disabled={isStreaming || isLoading || isFinishingSession}
+            >
+              {isFinishingSession ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <Ionicons name="checkmark-circle" size={18} color={colors.primary} />
+              )}
+              <Text style={[styles.toolbarButtonText, { color: colors.text }]}>
+                {isFinishingSession ? 'Processing...' : 'Finish Session'}
+              </Text>
+            </Pressable>
+          </View>
+        )}
+        <ChatInput 
+          onSend={handleSend} 
+          isDisabled={isStreaming || isLoading || aiConsentStatus !== 'granted'}
+          isStreaming={isStreaming}
+          onStop={cancelStreaming}
+        />
+      </View>
+
+      {/* Session Done Modal */}
+      <Modal
+        visible={showSessionDoneModal}
+        transparent
+        animationType="fade"
+        onRequestClose={handleSessionDoneOK}
+      >
+        <View style={styles.sessionDoneOverlay}>
+          <View style={[styles.sessionDoneCard, { backgroundColor: colors.surface, borderColor: colors.glass.border }]}>
+            <Text style={[styles.sessionDoneTitle, { color: colors.text }]}>Session saved ✓</Text>
+            <Text style={[styles.sessionDoneMessage, { color: colors.textSecondary }]}>
+              Thank you for talking. I have noted the most important points of our conversation for next time we talk again.
+            </Text>
+            <Pressable
+              style={[styles.sessionDoneButton, { backgroundColor: colors.primary }]}
+              onPress={handleSessionDoneOK}
+            >
+              <Text style={styles.sessionDoneButtonText}>OK</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Menu Modal */}
+      <Modal
+        visible={showMenu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowMenu(false)}
+      >
+        <Pressable 
+          style={styles.menuOverlay}
+          onPress={() => setShowMenu(false)}
+        >
+          <View style={[styles.menuContent, { backgroundColor: colors.surface, borderColor: colors.glass.border }]}>
+            <Pressable
+              style={styles.menuItem}
+              onPress={handleClearChat}
+            >
+              <Ionicons name="trash-outline" size={20} color={colors.error} />
+              <Text style={[styles.menuItemText, { color: colors.error }]}>Clear Chat History</Text>
+            </Pressable>
+            <View style={[styles.menuDivider, { backgroundColor: colors.glass.border }]} />
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => setShowMenu(false)}
+            >
+              <Ionicons name="close" size={20} color={colors.textMuted} />
+              <Text style={[styles.menuItemText, { color: colors.text }]}>Cancel</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  starField: {
+    position: 'absolute',
+    width: '100%',
+    height: '100%',
+    top: 0,
+    left: 0,
+    pointerEvents: 'none',
+  },
+  star: {
+    position: 'absolute',
+    width: 2,
+    height: 2,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 1,
+  },
+  speechBubble: {
+    position: 'absolute',
+    top: '20%',
+    left: '50%',
+    marginLeft: -120,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+    width: 240,
+  },
+  speechBubbleContent: {
+    backgroundColor: COLORS.glass.background,
+    borderRadius: BORDER_RADIUS.lg,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  speechBubbleText: {
+    ...TYPOGRAPHY.body,
+    textAlign: 'center',
+    color: COLORS.text,
+  },
+  speechBubbleTail: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: 10,
+    borderRightWidth: 10,
+    borderTopWidth: 12,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: COLORS.glass.background,
+    marginTop: -1,
+    alignSelf: 'center',
+  },
+  contextIndicatorContainer: {
+    position: 'absolute',
+    top: '60%',
+    left: '50%',
+    marginLeft: -160,
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    zIndex: 2,
+    width: 320,
+    maxHeight: '35%',
+  },
+  auroraContainer: {
+    position: 'absolute',
+    top: '45%',
+    left: '50%',
+    marginTop: -(width * 0.7) / 2,
+    marginLeft: -(width * 0.7) / 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1, // Below chat container and input
+  },
+  headerAurora: {
+    position: 'absolute',
+    right: SPACING.md + 20,
+    zIndex: 2,
+  },
+  floatingAurora: {
+    position: 'absolute',
+    zIndex: 0, // Behind messages but visible
+    width: 60,
+    height: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  borderGlow: {
+    position: 'absolute',
+    zIndex: 1, // Above Aurora but below messages
+    borderRadius: 2,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 8,
+    elevation: 5,
+    overflow: 'hidden',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingBottom: SPACING.sm,
+    borderBottomWidth: 1,
+    zIndex: 10,
+    backgroundColor: 'transparent',
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerContent: {
+    flex: 1,
+    marginLeft: SPACING.md,
+  },
+  headerTitle: {
+    ...TYPOGRAPHY.bodyMedium,
+    // Use Manjari Bold for the Aurora chat header title only
+    fontFamily: 'Manjari-Bold',
+    fontWeight: '400',
+  },
+  headerSubtitle: {
+    ...TYPOGRAPHY.caption,
+  },
+  menuButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  psychologySymbolContainer: {
+    width: 36,
+    height: 36,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  chatContainer: {
+    flex: 1,
+    zIndex: 5, // Always above Aurora, below header
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    ...TYPOGRAPHY.body,
+    marginTop: SPACING.md,
+  },
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
+    paddingBottom: 100,
+  },
+  menuContent: {
+    backgroundColor: COLORS.surface,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderWidth: 1,
+    borderColor: COLORS.glass.border,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    marginHorizontal: SPACING.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.md,
+  },
+  menuItemText: {
+    ...TYPOGRAPHY.bodyMedium,
+    marginLeft: SPACING.md,
+  },
+  menuDivider: {
+    height: 1,
+    backgroundColor: COLORS.glass.border,
+    marginVertical: SPACING.xs,
+  },
+  sessionDoneOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.xl,
+  },
+  sessionDoneCard: {
+    width: '100%',
+    borderRadius: BORDER_RADIUS.xl,
+    borderWidth: 1,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.xl,
+    alignItems: 'center',
+    gap: SPACING.md,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  sessionDoneTitle: {
+    ...TYPOGRAPHY.h3,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  sessionDoneMessage: {
+    ...TYPOGRAPHY.body,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  sessionDoneButton: {
+    marginTop: SPACING.sm,
+    paddingVertical: SPACING.sm + 2,
+    paddingHorizontal: SPACING.xl * 2,
+    borderRadius: BORDER_RADIUS.full,
+  },
+  sessionDoneButtonText: {
+    ...TYPOGRAPHY.bodyMedium,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  toolbar: {
+    flexDirection: 'row',
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderBottomWidth: 1,
+    backgroundColor: COLORS.surface,
+    gap: SPACING.sm,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  toolbarSpacer: {
+    flex: 1,
+  },
+  toolbarButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    borderRadius: BORDER_RADIUS.full,
+    borderWidth: 1,
+    gap: SPACING.xs,
+  },
+  toolbarButtonText: {
+    ...TYPOGRAPHY.small,
+    fontWeight: '500',
+  },
+});
+
